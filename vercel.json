@@ -9,6 +9,6 @@
     { "source": "/health", "destination": "/api/bot" }
   ],
   "crons": [
-    { "path": "/ping", "schedule": "*/5 * * * *" }
+    { "path": "/ping", "schedule": "0 0 * * *" }
   ]
 }

