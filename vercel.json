@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "builds": [
+    { "src": "api/bot.js", "use": "@vercel/node" }
+  ],
+  "rewrites": [
+    { "source": "/webhook", "destination": "/api/bot" },
+    { "source": "/ping", "destination": "/api/bot" },
+    { "source": "/health", "destination": "/api/bot" }
+  ],
+  "crons": [
+    { "path": "/ping", "schedule": "*/5 * * * *" }
+  ]
+}

