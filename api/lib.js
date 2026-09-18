@@ -327,6 +327,20 @@ function safeMd(s) {
   return String(s == null ? '' : s).replace(/[_*[\]`]/g, ' ');
 }
 
+// Pick the public base URL Telegram should call back on.
+// On Vercel, VERCEL_URL is the per-deployment host which is gated by
+// Deployment Protection (SSO) → Telegram gets 401. Prefer the explicit
+// WEBHOOK_URL (custom domain / prod alias), then the stable production URL,
+// and only fall back to VERCEL_URL as a last resort.
+function resolveWebhookBase(env) {
+  const e = env || {};
+  const base =
+    e.WEBHOOK_URL ||
+    (e.VERCEL_PROJECT_PRODUCTION_URL ? `https://${e.VERCEL_PROJECT_PRODUCTION_URL}` : '') ||
+    (e.VERCEL_URL ? `https://${e.VERCEL_URL}` : '');
+  return String(base || '').replace(/\/+$/, '');
+}
+
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 module.exports = {
@@ -334,5 +348,5 @@ module.exports = {
   parseBalanceFromText, parseBalancesFromText,
   isBankTransaction, normalizePhone, extractIndianNumber,
   parseTokenFromMessage, extractRealNumber, maskFirebase, maskDeviceId,
-  fmtAmount, fmtTimeAgo, safeMd, sleep
+  fmtAmount, fmtTimeAgo, safeMd, resolveWebhookBase, sleep
 };

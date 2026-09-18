@@ -3,7 +3,7 @@ const assert = require('assert');
 const {
   parseTokenFromMessage, extractIndianNumber, extractRealNumber,
   isBankTransaction, parseBalanceFromText, detectBanksFromText,
-  maskFirebase, normalizePhone, fmtAmount
+  maskFirebase, normalizePhone, fmtAmount, resolveWebhookBase
 } = require('./api/lib');
 
 let pass = 0, fail = 0;
@@ -117,6 +117,18 @@ function ok(name, cond) {
 {
   ok('num To:', extractIndianNumber('To: 9876543210\nBody: x') === '+919876543210');
   ok('num 91', extractIndianNumber('+91 9876543210 Body test') === '+919876543210');
+}
+// ---- webhook base resolution (must prefer public URL over SSO-gated VERCEL_URL) ----
+{
+  ok('webhook prefers WEBHOOK_URL',
+    resolveWebhookBase({ WEBHOOK_URL: 'https://prod.example.com', VERCEL_URL: 'deploy-abc.vercel.app', VERCEL_PROJECT_PRODUCTION_URL: 'proj.vercel.app' }) === 'https://prod.example.com');
+  ok('webhook uses VERCEL_PROJECT_PRODUCTION_URL over VERCEL_URL',
+    resolveWebhookBase({ VERCEL_URL: 'deploy-abc.vercel.app', VERCEL_PROJECT_PRODUCTION_URL: 'proj.vercel.app' }) === 'https://proj.vercel.app');
+  ok('webhook strips trailing slash',
+    resolveWebhookBase({ WEBHOOK_URL: 'https://prod.example.com/' }) === 'https://prod.example.com');
+  ok('webhook falls back to VERCEL_URL',
+    resolveWebhookBase({ VERCEL_URL: 'deploy-abc.vercel.app' }) === 'https://deploy-abc.vercel.app');
+  ok('webhook empty when nothing set', resolveWebhookBase({}) === '');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

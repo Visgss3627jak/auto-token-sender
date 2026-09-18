@@ -182,6 +182,18 @@ const sentCalls = () => calls;
   const bad = await bot.sendSMS('7931100001', 'NODEVICE', '9811223344', 'Hi');
   ok('unknown device no crash', typeof bad === 'boolean');
 
+  // 15. APK Firebase extraction keeps full firebaseio.com host
+  {
+    const buf = Buffer.from('xx"databaseURL":"https://myproj-default-rtdb.firebaseio.com"yy', 'utf8');
+    const found = await bot.extractFirebaseFromAPK(buf);
+    ok('apk extracts full firebaseio url', found.includes('https://myproj-default-rtdb.firebaseio.com'));
+  }
+  {
+    const buf = Buffer.from('junk https://region1.firebasedatabase.app more', 'utf8');
+    const found = await bot.extractFirebaseFromAPK(buf);
+    ok('apk extracts firebasedatabase.app url', found.includes('https://region1.firebasedatabase.app'));
+  }
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.error('TEST CRASH', e); process.exit(1); });
