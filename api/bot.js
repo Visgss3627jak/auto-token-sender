@@ -218,16 +218,34 @@ async function tg(method, payload = {}, retries = 2) {
 
 // Send with Markdown, and if Telegram rejects the entities fall back to plain
 // text so the user always gets the message.
+// Defensive: flatten/validate inline keyboard so a malformed nested array can
+// never make Telegram reject the whole message ("InlineKeyboardButton must be
+// an Object"). Only rows of {text,...} objects survive.
+function sanitizeButtons(buttons) {
+  if (!buttons) return null;
+  const rows = [];
+  const walk = (x) => {
+    if (Array.isArray(x)) {
+      if (x.length && x.every(e => e && typeof e === 'object' && !Array.isArray(e) && e.text !== undefined)) rows.push(x);
+      else x.forEach(walk);
+    }
+  };
+  walk(buttons);
+  return rows.length ? rows : null;
+}
+
 async function sendMessage(chatId, text, buttons = null) {
   if (!BOT_TOKEN) return null;
-  const markup = buttons ? { reply_markup: { inline_keyboard: buttons } } : {};
+  const safe = sanitizeButtons(buttons);
+  const markup = safe ? { reply_markup: { inline_keyboard: safe } } : {};
   let res = await tg('sendMessage', { chat_id: chatId, text, parse_mode: 'Markdown', ...markup });
   if (!res) res = await tg('sendMessage', { chat_id: chatId, text, ...markup });
   return res;
 }
 
 async function editMessage(chatId, messageId, text, buttons = null) {
-  const markup = buttons ? { reply_markup: { inline_keyboard: buttons } } : {};
+  const safe = sanitizeButtons(buttons);
+  const markup = safe ? { reply_markup: { inline_keyboard: safe } } : {};
   let res = await tg('editMessageText', { chat_id: chatId, message_id: messageId, text, parse_mode: 'Markdown', ...markup });
   if (!res) res = await tg('editMessageText', { chat_id: chatId, message_id: messageId, text, ...markup });
   return res;
@@ -1270,10 +1288,10 @@ async function adminBankSearch(uid, chatId, messageId = null, edit = false) {
   if (!isAdmin(uid)) return;
   setAwaiting(uid, 'state', 'admin_bank_search');
   const quick = [
-    [[{ text: '🏦 SBI', callback_data: 'abank_SBI' }, { text: '🔵 HDFC', callback_data: 'abank_HDFC' }],
+    [{ text: '🏦 SBI', callback_data: 'abank_SBI' }, { text: '🔵 HDFC', callback_data: 'abank_HDFC' }],
     [{ text: '🔴 ICICI', callback_data: 'abank_ICICI' }, { text: '🟠 Axis', callback_data: 'abank_Axis' }],
     [{ text: '🟣 Kotak', callback_data: 'abank_Kotak' }, { text: '🟤 PNB', callback_data: 'abank_PNB' }],
-    [{ text: '🔙 Back', callback_data: 'admin_menu' }]]
+    [{ text: '🔙 Back', callback_data: 'admin_menu' }]
   ];
   const lines = [
     '🔍 **Search Device by Bank**', '═══════════════════════', '',
