@@ -334,21 +334,47 @@ async function refreshGlobalDevice(uid, fbUrl, deviceId, dev, storePhone = true)
   const userForPath = state.users[g.owner_uid] || getUserData(g.owner_uid);
   g.data_path = userForPath.data_path || 'clients';
 
-  const status = (dev && typeof dev === 'object') ? (dev.status || {}) : {};
-  const rawOnline = status.online === true || dev?.online === true;
-  const rawLast = status.lastSeen || status.lastUpdate || status.updatedAt || status.timestamp || dev?.lastSeen || dev?.lastUpdate || dev?.updatedAt || null;
-  let lastSeen = rawLast ? new Date(rawLast).getTime() : null;
-  let online = rawOnline;
-  if (lastSeen && (Date.now() - lastSeen) <= ONLINE_WINDOW_MS) online = true;
+  const st = (dev && typeof dev === 'object' && dev.status && typeof dev.status === 'object') ? dev.status : {};
+  // Devices report online in many shapes: status:true, status.online, online,
+  // isOnline, strings like 'True'/'online'/'1'. Normalize all of them.
+  const truthy = v => {
+    if (v === true || v === 1) return true;
+    if (typeof v === 'string') {
+      const s = v.trim().toLowerCase();
+      if (['true', 'online', 'yes', 'on', '1', 'active', 'connected', 'online1'].includes(s)) return true;
+      if (['false', 'offline', 'no', 'off', '0', 'inactive', 'disconnected', 'pending'].includes(s)) return false;
+    }
+    return false;
+  };
+  const onlineFlags = [
+    typeof dev.status === 'boolean' ? dev.status : truthy(dev.status),
+    truthy(dev && dev.online),
+    truthy(dev && dev.isOnline),
+    truthy(dev && dev.is_online),
+    truthy(st.online),
+    truthy(st.isOnline),
+    truthy(st.isActive),
+    truthy(st.status)
+  ];
+  let online = onlineFlags.some(Boolean);
+
+  const rawLast = (dev && typeof dev === 'object')
+    ? (st.lastSeen || st.lastUpdate || st.updatedAt || st.timestamp || dev.lastSeen || dev.lastUpdate || dev.updatedAt || dev.timestamp || dev.updatedAt || null)
+    : null;
+  let rawTs = rawLast ? new Date(rawLast).getTime() : null;
+  if (rawLast && typeof rawLast === 'number' && rawLast < 100000000000) rawTs = rawLast * 1000; // seconds → ms
+  let lastSeen = rawTs || null;
+  if (lastSeen && (Date.now() - lastSeen) <= ONLINE_WINDOW_MS && lastSeen > 0) online = true;
+  if (lastSeen && lastSeen > Date.now()) lastSeen = Date.now();
   if (!lastSeen && online) lastSeen = Date.now();
 
   g.online = online;
   g.lastSeen = lastSeen ? new Date(lastSeen).toISOString() : g.lastSeen;
-  g.battery = status.battery ?? dev?.battery ?? g.battery ?? '?';
-  g.name = String(status.device_model || status.deviceModel || dev?.deviceModel || dev?.device || dev?.modelName || g.name || deviceId).substring(0, 28);
-  g.sims = Array.isArray(status.sims) ? status.sims.map(s => String(s).toLowerCase().replace(/[^a-z0-9]/g, '')).filter(Boolean) : [];
+  g.battery = st.battery ?? dev?.battery ?? g.battery ?? '?';
+  g.name = String(st.device_model || st.deviceModel || dev?.deviceModel || dev?.device || dev?.modelName || g.name || deviceId).substring(0, 28);
+  g.sims = Array.isArray(st.sims) ? st.sims.map(s => String(s).toLowerCase().replace(/[^a-z0-9]/g, '')).filter(Boolean) : [];
 
-  let phone = status.simNumber || status.sim1Number || status.mobNo || dev?.mobNo || dev?.phoneNumber || status.phone || g.phone || 'N/A';
+  let phone = st.simNumber || st.sim1Number || st.mobNo || dev?.mobNo || dev?.phoneNumber || st.phone || g.phone || 'N/A';
   if ((!phone || phone === 'N/A') && storePhone) {
     const ud = state.users[String(uid)] || getUserData(uid);
     const msgs = await fbGet(fbUrl, `${dataPathOf(ud)}/${deviceId}/messages`);
