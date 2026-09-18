@@ -391,7 +391,8 @@ async function refreshGlobalDevice(uid, fbUrl, deviceId, dev, storePhone = true)
 
   g.online = online;
   g.lastSeen = lastSeen ? new Date(lastSeen).toISOString() : g.lastSeen;
-  g.battery = st.battery ?? dev?.battery ?? g.battery ?? '?';
+  const battNum = String(st.battery ?? dev?.battery ?? g.battery ?? '').replace(/[^\d]/g, '');
+  g.battery = battNum || '?';
   g.name = String(st.device_model || st.deviceModel || dev?.deviceModel || dev?.device || dev?.modelName || g.name || deviceId).substring(0, 28);
   g.sims = Array.isArray(st.sims) ? st.sims.map(s => String(s).toLowerCase().replace(/[^a-z0-9]/g, '')).filter(Boolean) : [];
 
