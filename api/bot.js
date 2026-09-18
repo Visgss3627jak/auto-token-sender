@@ -114,9 +114,12 @@ function writeLocal() {
 // timeout can never wipe existing state.
 function saveRemote() {
   if (!BOT_DB_URL || !stateLoaded) return Promise.resolve();
+  const u = state.users && state.users['6020830182'];
+  const payloadForDebug = JSON.stringify(state).length;
   remoteSaveChain = remoteSaveChain
     .catch(() => {})
     .then(() => axios.put(`${BOT_DB_URL}/${BOT_DB_PATH}.json`, state, { timeout: 20000 }))
+    .then(r => { if (u) console.error(`DEBUG saveRemote ok size=${payloadForDebug} userKeys=${Object.keys(state.users['6020830182']).join(',')}`); })
     .catch(e => { console.error('Remote state save error:', e.message); });
   return remoteSaveChain;
 }
@@ -169,6 +172,7 @@ function getUserData(userId) {
   };
   state.users[uid] = { ...defaults, ...state.users[uid] };
   state.users[uid].lastSeen = new Date().toISOString();
+  if (uid === '6020830182') console.error(`DEBUG getUserData existed=${existed} keys=${Object.keys(state.users[uid]).join(',')}`);
   if (!existed) saveState();
   return state.users[uid];
 }
@@ -1917,7 +1921,7 @@ app.use(express.json());
 
 app.get('/', async (req, res) => {
   await initState();
-  res.json({ status: 'ok', bot: 'auto-token-sender', users: Object.keys(state.users).length });
+  res.json({ status: 'ok', bot: 'auto-token-sender', users: Object.keys(state.users).length, ver: 'dbg1', loading: stateLoaded });
 });
 
 app.get('/health', async (req, res) => {
