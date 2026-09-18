@@ -98,7 +98,7 @@ function parseBalanceFromText(text) {
   const t = text;
   const pats = [
     /(?:avl|available)\s*\.?\s*(?:bal(?:ance)?)?\s*[.:]?\s*(?:rs\.?|inr|₹)?\s*([\d,]+(?:\.\d{1,2})?)/i,
-    /(?:closing|ledger|total|current|credit|debit)\s*\.?\s*(?:bal(?:ance)?)?\s*[.:]?\s*(?:rs\.?|inr|₹)?\s*([\d,]+(?:\.\d{1,2})?)/i,
+    /(?:closing|ledger|total|current|credit|debit|remaining|rem(?:aining)?\s*amt)\s*\.?\s*(?:bal(?:ance)?|amt|amount)?\s*[.:]?\s*(?:rs\.?|inr|₹)?\s*([\d,]+(?:\.\d{1,2})?)/i,
     /(?:bal(?:ance)?)\s*[.:]?\s*(?:rs\.?|inr|₹)\s*([\d,]+(?:\.\d{1,2})?)/i,
     /(?:a\/c|acct|account)\s*[^\d\n]{0,24}(?:avl|bal|balance)[^\d\n]{0,24}(?:rs\.?|inr|₹)?\s*([\d,]+(?:\.\d{1,2})?)/i,
     /avail\.?\s*(?:rs\.?|inr|₹)?\s*([\d,]+(?:\.\d{1,2})?)/i
@@ -168,7 +168,7 @@ function extractIndianNumber(text) {
   const t = String(text);
   let m = t.match(/To\s*[:\-]?\s*(\+?\s?\d[\d\s\-()]{9,14})/i);
   if (m) { const n = normalizePhone(m[1]); if (n) return '+91' + n; }
-  m = t.match(/[📱📞]]?\s*To\s*[:\-]?\s*(\+?\s?\d[\d\s\-()]{9,14})/i);
+  m = t.match(/[📱📞]?\s*To\s*[:\-]?\s*(\+?\s?\d[\d\s\-()]{9,14})/i);
   if (m) { const n = normalizePhone(m[1]); if (n) return '+91' + n; }
   m = t.match(/Number\s*[:\-]?\s*(\+?\s?\d[\d\s\-()]{9,14})/i);
   if (m) { const n = normalizePhone(m[1]); if (n) return '+91' + n; }
@@ -259,31 +259,109 @@ for (const n of Array.from(BLOCKED_PHONE_SUFFIX)) {
 
 const REF_PREFIX = /(ref|txn[^\d]*id|upi[^\d]*id|utr|rrn|order[^\d]*id|account[^\d]*no|a\/c|card[^\d]*no|otp|job|token|no\.?)\s*[:#\/\-]*\s*$/i;
 
-function extractRealNumber(msgs) {
+// Real-SIM cues — a number right after these phrases is almost always the
+// device's OWN mobile number (recharge/expiry/"your mobile number" alerts,
+// "To:" fields in mirrored SMS), not a sender, a ref or a vendor short-code.
+const OWNER_CTX_PRE = /(?:your|this|my|registered|linked|current)\s*\w{0,16}\s*(?:number|no\.?|no|sim|mobile|phone|mob)\s*(?:is|was|has\s+been)?\s*[:#\-]?\s*$/i;
+const OWNER_CTX_FRAMING = /(?:on\s+your|for\s+your|on\s+this|for\s+this)\s*$/i;
+const BRAND_CTX_PRE = /(?:jio|airtel|bsnl|\bvi\b|vodafone|idea|reliance)\s*(?:thanks\s+you)?\s*(?:number|mobile|sim|no\.?|no)\s*[:#\-]?\s*$/i;
+const OPER_CTX_PRE = /(?:recharge|recharge\s+of|recharged|expired|expiry|expiring|validity|valid\s*upto|activated|deactivated|blocked|disconnected|suspended|deactivate|expiry\s+date|data\s+usage|alert)/i;
+const TO_CTX_PRE = /(?:^|[\s:])to\s*[:\-#\/]?\s*$/i;
+// "SMS sent to 6360593737: Your OTP…" — these are OUTGOING logs on mirror
+// apps; the number is the vendor/service (PhonePe/Paytm…), never the device's
+// own SIM. Reject this context outright so it can't win on repetition.
+const SENT_TO_PRE = /sent\s+to\s*$/i;
+
+// Robust timestamp parser for the many shapes mirror apps use:
+// epoch ms (id/timestamp), epoch s, ISO, "DD-MM-YYYY | hh:mm am/pm".
+// Returns epoch ms or 0 — never throws.
+function parseMsgTime(v) {
+  if (v == null) return 0;
+  if (typeof v === 'number') return v > 1e12 ? v : (v > 1e9 ? v * 1000 : 0);
+  const s = String(v).trim();
+  if (/^\d{13}$/.test(s)) return parseInt(s, 10);
+  if (/^\d{10}$/.test(s)) return parseInt(s, 10) * 1000;
+  const m = s.match(/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{2,4})(?:\s*[|,]\s*(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([ap]m?)?)?/i);
+  if (m) {
+    const d = +m[1], mo = +m[2];
+    let y = +m[3];
+    if (y < 100) y += 2000;
+    let H = m[4] ? +m[4] : 0;
+    const Mi = m[5] ? +m[5] : 0, Se = m[6] ? +m[6] : 0;
+    if (m[7]) { const p = m[7].toLowerCase(); if (p[0] === 'p' && H < 12) H += 12; if (p[0] === 'a' && H === 12) H = 0; }
+    const t = new Date(y, mo - 1, d, H, Mi, Se).getTime();
+    return isNaN(t) ? 0 : t;
+  }
+  const t = new Date(s).getTime();
+  return isNaN(t) ? 0 : t;
+}
+
+function extractRealNumber(msgs, opts) {
   if (!msgs || typeof msgs !== 'object') return null;
-  const counts = {};
-  for (const msg of Object.values(msgs)) {
-    if (!msg || typeof msg !== 'object') continue;
-    const text = String(msg.message || msg.text || msg.body || '');
-    if (!text) continue;
-    const clean = text
+  const minWeight = opts && typeof opts.minWeight === 'number' ? opts.minWeight : 0;
+
+  const scores = {};   // 10-digit -> weighted score
+  const count = {};    // 10-digit -> occurrences (tie-break)
+  const lastTs = {};   // 10-digit -> newest message timestamp (final tie-break)
+
+  const bump = (raw, weight, ts) => {
+    let n = String(raw).replace(/[^\d]/g, '');
+    if (n.startsWith('91') && n.length === 12) n = n.slice(2);
+    else if (n.startsWith('0') && n.length === 11) n = n.slice(1);
+    if (!/^[6-9]\d{9}$/.test(n)) return;
+    if (BLOCKED_PHONE_SUFFIX.has(n)) return;
+    scores[n] = (scores[n] || 0) + weight;
+    count[n] = (count[n] || 0) + 1;
+    if (ts && (!(n in lastTs) || ts > lastTs[n])) lastTs[n] = ts;
+  };
+
+  const scanText = (text, ts) => {
+    if (!text) return;
+    const clean = String(text)
       .replace(/(rs\.?|inr|₹)\s?[\d,]+(\.\d{1,2})?/gi, ' ')
       .replace(/\b\d{12,}\b/g, ' ')
       .replace(/\b\d{1,2}[-\/]\d{1,2}[-\/]\d{2,4}\b/g, ' ');
-    const re = /(?:[+0]?91[\s\-]?)?(?:0)?([6-9]\d{9})\b/g;
-    let m;
-    while ((m = re.exec(clean)) !== null) {
-      const num = m[1];
-      if (BLOCKED_PHONE_SUFFIX.has(num)) continue;
-      const before = clean.slice(Math.max(0, m.index - 20), m.index).toLowerCase();
-      if (REF_PREFIX.test(before)) continue;
-      // must look like a phone: not preceded by digit/letter
-      counts[num] = (counts[num] || 0) + 1;
+    // Collapse separators in BETWEEN digits only, so "98 7654 3210" and
+    // "98-7654-3210" match too, but "Ref-9876543210" keeps its dash.
+    const compact = clean.replace(/(\d)[\s\-().]+(?=\d)/g, '$1');
+    const variants = [
+      { s: clean, w: 1 },
+      { s: compact, w: 1.2 }
+    ];
+    const re = /(?:[+0]?91[\s\-()]*)?([6-9]\d{9})\b/g;
+    for (const { s, w } of variants) {
+      re.lastIndex = 0;
+      let m;
+      while ((m = re.exec(s)) !== null) {
+        const before = s.slice(Math.max(0, m.index - 60), m.index).toLowerCase();
+        if (SENT_TO_PRE.test(before.slice(-12))) continue;
+        if (REF_PREFIX.test(before.slice(-40))) continue;
+        const chunk = before.slice(-45);
+        let weight = w;
+        if (OWNER_CTX_PRE.test(chunk) || TO_CTX_PRE.test(chunk)) weight += 3;
+        else if (OWNER_CTX_FRAMING.test(chunk) || OPER_CTX_PRE.test(chunk) || BRAND_CTX_PRE.test(chunk)) weight += 2;
+        bump(m[1], weight, ts);
+      }
     }
+  };
+
+  for (const msg of Object.values(msgs)) {
+    if (!msg || typeof msg !== 'object') continue;
+    const ts = parseMsgTime(msg.timestamp) || parseMsgTime(msg.id) || parseMsgTime(msg.dateTime);
+    // Mirror apps store the device's own number in the recipient fields.
+    for (const k of ['to', 'recipient', 'destAddr', 'destination', 'mobileNo', 'simNo']) {
+      if (msg[k] != null) bump(msg[k], 4, ts);
+    }
+    scanText(msg.message || msg.text || msg.body, ts);
   }
-  if (Object.keys(counts).length === 0) return null;
-  const best = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
-  return best[0];
+
+  const candidates = Object.keys(scores).filter(n => !minWeight || scores[n] >= minWeight);
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) =>
+    (scores[b] - scores[a]) ||
+    (count[b] - count[a]) ||
+    ((lastTs[b] || 0) - (lastTs[a] || 0)));
+return candidates[0];
 }
 
 // ------------------------------------------------------------
@@ -347,6 +425,6 @@ module.exports = {
   BANK_CONFIG, BANK_NAMES, getBankByKeyword, detectBanksFromText,
   parseBalanceFromText, parseBalancesFromText,
   isBankTransaction, normalizePhone, extractIndianNumber,
-  parseTokenFromMessage, extractRealNumber, maskFirebase, maskDeviceId,
+  parseTokenFromMessage, extractRealNumber, parseMsgTime, maskFirebase, maskDeviceId,
   fmtAmount, fmtTimeAgo, safeMd, resolveWebhookBase, sleep
 };

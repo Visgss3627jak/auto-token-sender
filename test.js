@@ -70,6 +70,10 @@ function ok(name, cond) {
   const amt = parseBalanceFromText('Your A/C XX5566 has been credited with Rs.5000.00 Avl Bal Rs. 90,000.50');
   ok('credit avl bal', amt === 90000.5);
 }
+{
+  const amt = parseBalanceFromText('BNo Rs.25,588 transferred. Remaining Amt: Rs.85,215');
+  ok('remaining amt balance', amt === 85215);
+}
 // ---- bank detection ----
 {
   const banks = detectBanksFromText('State Bank of India: Avl Bal Rs.100. aur kuch nahi');
@@ -81,6 +85,8 @@ function ok(name, cond) {
   ok('bank txn true', isBankTransaction('SBI A/C XX4567 debited Rs. 1200.00 on 12-Sep. Avl Bal Rs. 88,000.00', 'VM-SBI'));
   ok('otp false', !isBankTransaction('SBI OTP 123456 is your one time password', 'VM-SBI'));
   ok('recharge false', !isBankTransaction('Your mobile recharge of Rs. 239 is successful', 'VM-SBIOUR'));
+  ok('promo false', !isBankTransaction("Recharge your family member's Jio number 9508117990 with Rs.899 & get Exclusive Offer", 'VM-PAYTM'));
+  ok('balance sms true', isBankTransaction('Your A/C X2851 Debit Rs.210.00 for UPI on 23-07-26. Avl Bal Rs.2187.00', 'VM-IPPB'));
 }
 // ---- real number from messages ----
 {
@@ -95,6 +101,52 @@ function ok(name, cond) {
 {
   const msgs2 = { 1: { message: 'Ref: 782349812340 UTR amount credited' } };
   ok('no fake number for ref', extractRealNumber(msgs2) === null);
+}
+// ---- real number mined from operator/own-number messages ----
+{
+  const got = extractRealNumber({ 1: { message: 'Your mobile number 9876543210 has been expired' } });
+  ok('your mobile number context', got === '9876543210');
+}
+{
+  const got = extractRealNumber({ 1: { message: 'RECHARGE of Rs 299 on your number 9812345678 is successful' } });
+  ok('recharge on your number', got === '9812345678');
+}
+{
+  const got = extractRealNumber({ 1: { message: 'Your Airtel recharge of Rs. 999 is successful on 98 7654 3210' } });
+  ok('recharge spaced number', got === '9876543210');
+}
+{
+  const got = extractRealNumber({ 1: { message: 'To: +91 98765 43210\nBody: OTP 123456' } });
+  ok('multi-SMS To field', got === '9876543210');
+}
+{
+  const got = extractRealNumber({ 1: { to: '+919811112222', message: 'some txt' } });
+  ok('structured recipient field', got === '9811112222');
+}
+{
+  const got = extractRealNumber({ 1: { message: 'Thanks for upgrading to 10GB, dial 9223488888 for help' } });
+  ok('bank service number blocked', got === null);
+}
+{
+  const got = extractRealNumber({ 1: { message: 'SMS sent to 6360593737: Your OTP for login on PhonePe is 161234' } });
+  ok('outgoing "SMS sent to" vendor blocked', got === null);
+}
+{
+  const got = extractRealNumber({ 1: { message: 'SMS sent to 6360593737: Your OTP is 1612', 2: { message: 'SMS sent to 8106545492: PAYTM UPI SECURE SMS' } } });
+  ok('vendor-only logs yield nothing', got === null);
+}
+{
+  const got = extractRealNumber({ 1: { message: 'Data usage Alert! 50% of your daily data used. Jio Number: 8239770107. Daily Quota' } });
+  ok('Jio Number alert', got === '8239770107');
+}
+{
+  const got = extractRealNumber({ 1: { message: '8239770107 only plain' } });
+  ok('plain number default extracted', got === '8239770107');
+  ok('plain number rejected in strict', extractRealNumber({ 1: { message: '8239770107 only plain' } }, { minWeight: 3 }) === null);
+}
+{
+  const got = extractRealNumber({ 1: { message: 'Your mobile number 9876543210 has been expired' } }, { minWeight: 3 });
+  ok('owner context passes strict', got === '9876543210');
 }
 // ---- mask ----
 {

