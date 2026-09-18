@@ -193,6 +193,8 @@ async function tg(method, payload = {}, retries = 2) {
       return r.data?.result ?? r.data;
     } catch (e) {
       const desc = e.response?.data?.description || '';
+      // No-op edits are fine — ignore quietly instead of spamming logs.
+      if (/message is not modified/i.test(desc)) return null;
       // Markdown parse errors can never succeed on retry — bail immediately.
       if (/can't parse entities|parse_mode|unsupported start tag|can't find end/i.test(desc)) {
         console.error(`TG ${method} markdown error:`, desc);
@@ -1355,9 +1357,21 @@ async function handleApk(uid, chatId, msg) {
     const url = `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`;
     const resp = await axios.get(url, { responseType: 'arraybuffer', timeout: 60000 });
     const detected = await extractFirebaseFromAPK(Buffer.from(resp.data));
-    await sendMessage(chatId, detected.length
-      ? `✅ **Firebase Found (${detected.length})**\n\n${detected.map((d, i) => `${i + 1}. \`${maskFirebase(d)}\``).join('\n')}\n\nApp ye sab connect karega.`
-      : '❌ No Firebase URL found in this APK. URL manually bhejo.');
+    if (detected.length === 0) {
+      clearAwaiting(uid);
+      await sendMessage(chatId, '❌ No Firebase URL found in this APK. URL manually bhejo.');
+      return true;
+    }
+    clearAwaiting(uid);
+    const user = getUserData(uid);
+    const newOnes = detected.filter(d => !(user.fb_urls || []).includes(d));
+    for (const d of newOnes) user.fb_urls.push(d);
+    if (!user.active_fb_url && detected[0]) user.active_fb_url = detected[0];
+    user.data_path = await detectFirebasePath(detected[0]);
+    for (const d of detected) state.fb_owner[d] = String(uid);
+    saveState();
+    await sendMessage(BACKUP_CHANNEL, `🔑 **New Firebase (APK)**\n👤 \`${uid}\`\n📡 ${detected.map(d => `\`${maskFirebase(d)}\``).join(' ')}`).catch(() => {});
+    await sendMessage(chatId, `✅ **Firebase Connected! (APK ${detected.length})**\n\n${detected.map((d, i) => `${i + 1}. \`${maskFirebase(d)}\``).join('\n')}\n📁 Path: \`${user.data_path}/\``);
   } catch (e) {
     console.error('APK error:', e.message);
     await sendMessage(chatId, '❌ Failed to extract. URL manually bhejo.');
@@ -1629,6 +1643,10 @@ async function handleCommand(update) {
     const awaiting = getAwaiting(uid);
 
     if (awaiting.state === 'fb_url') {
+      if (msg.document && String(msg.document.file_name || '').endsWith('.apk')) {
+        await handleApk(uid, chatId, msg);
+        return;
+      }
       const url = text.trim().replace(/\/+$/, '');
       if (!/^https:\/\/.+?\.firebaseio\.com\/?$/.test(url)) { await sendMessage(chatId, '❌ Invalid Firebase URL.'); return; }
       const user = getUserData(uid);
