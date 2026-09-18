@@ -166,16 +166,24 @@ function normalizePhone(s) {
 function extractIndianNumber(text) {
   if (!text) return null;
   const t = String(text);
-  let m = t.match(/To\s*[:\-]?\s*(\+?\s?\d[\d\s\-()]{9,14})/i);
+  const numRe = '(\\+?\\s?\\d[\\d\\s\\-()]{7,16})';
+  // "To:" / "To (Tap to copy):" / "📞 To:" — allow an optional parenthetical
+  // label and a value on the next line (many forwarder formats).
+  let m = t.match(new RegExp(`To\\s*(?:\\([^)]*\\))?\\s*[:\\-]?\\s*\\n?\\s*${numRe}`, 'i'));
+  if (m) { const n = normalizePhone(m[1]); if (n) return '+91' + n; }
+  m = t.match(new RegExp(`Number\\s*(?:\\([^)]*\\))?\\s*[:\\-]?\\s*\\n?\\s*${numRe}`, 'i'));
+  if (m) { const n = normalizePhone(m[1]); if (n) return '+91' + n; }
+  // "One-tap copy:\n<number> | <token>"
+  m = t.match(/one[\s-]*tap\s*copy\s*[:\-]?\s*\n?\s*(\d[\d\s\-()]{8,16})\s*[|·]/i);
   if (m) { const n = normalizePhone(m[1]); if (n) return '+91' + n; }
   m = t.match(/[📱📞]?\s*To\s*[:\-]?\s*(\+?\s?\d[\d\s\-()]{9,14})/i);
-  if (m) { const n = normalizePhone(m[1]); if (n) return '+91' + n; }
-  m = t.match(/Number\s*[:\-]?\s*(\+?\s?\d[\d\s\-()]{9,14})/i);
   if (m) { const n = normalizePhone(m[1]); if (n) return '+91' + n; }
   m = t.match(/\+\s?91[\s\-]?([6-9]\d[\s\-]?\d[\s\-]?\d[\s\-]?\d[\s\-]?\d[\s\-]?\d[\s\-]?\d[\s\-]?\d[\s\-]?\d[\s\-]?\d)/i);
   if (m) { const n = normalizePhone(m[1]); if (n) return '+91' + n; }
   m = t.match(/\b([6-9]\d{9})\b/);
   if (m) return '+91' + m[1];
+  m = t.match(/\b(0?[6-9]\d{9})\b/);
+  if (m) { const n = normalizePhone(m[1]); if (n) return '+91' + n; }
   m = t.match(/\b(\d{10,12})\b/);
   if (m) { const n = normalizePhone(m[1]); if (n) return '+91' + n; }
   return null;
@@ -190,18 +198,16 @@ function parseTokenFromMessage(text) {
   let token = null, tokenType = 'Unknown', body = null;
   let m;
 
-  // Body extraction
-  m = t.match(/Body\s*[:\-]?\s*(.+?)(?:\n|$)/i);
+  // Body extraction — handles labels with an optional "(Tap to copy)" suffix
+  // and a value on the following line.
+  const labeled = (label) => t.match(new RegExp(`${label}\\s*(?:\\([^)]*\\))?\\s*[:\\-]?\\s*\\n?\\s*(.+?)(?:\\n|$)`, 'i'));
+  m = labeled('💬\\s*Message') || labeled('Message');
   if (m) body = m[1].trim();
-  if (!body) {
-    m = t.match(/💬\s*Message\s*[:\-]?\s*(.+?)(?:\n|$)/i);
-    if (m) body = m[1].trim();
-  }
-  if (!body) {
-    m = t.match(/✉[:\-]?\s*(.+?)(?:\n|$)/);
-    if (m) body = m[1].trim();
-  }
-  if (!body) body = t.trim().substring(0, 600);
+  if (!body) { m = labeled('Body'); if (m) body = m[1].trim(); }
+  if (!body) { m = t.match(/✉[:\-]?\s*(.+?)(?:\n|$)/); if (m) body = m[1].trim(); }
+  // "One-tap copy:\n<number> | <body>"
+  if (!body) { m = t.match(/one[\s-]*tap\s*copy\s*[:\-]?\s*\n?\s*\d[\d\s\-()]{8,16}\s*[|·]\s*(.+?)(?:\n|$)/i); if (m) body = m[1].trim(); }
+  if (!body || /^\(.*copy\)?:?$/i.test(body)) body = t.trim().substring(0, 600);
 
   // Vendor specific (non-alnum separators only, so token chars survive)
   m = t.match(/PHONEPE[^A-Za-z0-9]{0,12}MULTI[^A-Za-z0-9]{0,12}SMS[^A-Za-z0-9]{0,12}VERIFY[^A-Za-z0-9]{0,12}([A-Z0-9]+:[a-z]+|[A-Za-z0-9+\/=]{8,})/i);

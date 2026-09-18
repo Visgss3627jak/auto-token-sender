@@ -57,6 +57,20 @@ function ok(name, cond) {
   ok('code after label', m.token === '447788');
   ok('num standalone', m.number === '+919876500011');
 }
+// ---- multi-format forwarder: "To:" + "Message:" + "One-tap copy" ----
+{
+  const m = parseTokenFromMessage('📱 SMS TOKEN 🖤@VICTORXXX67\n━━━━━━━━━━━━━━\n📞 To: 7406661121\n💬 Message: NSDLUPI UCi2PQRWQTjbmo9IyXNaSvdrI7NUxrqpViMYOb8ZnfRHvI8EtDMIjGo1fUxe6HWhAXl76yBTZveuLxgZ0aeog9\n\n📋 One-tap copy:\n7406661121 | NSDLUPI UCi2PQRWQTjbmo9IyXNaSvdrI7NUxrqpViMYOb8ZnfRHvI8EtDMIjGo1fUxe6HWhAXl76yBTZveuLxgZ0aeog9');
+  ok('fmtA number', m.number === '+917406661121');
+  ok('fmtA body', m.body === 'NSDLUPI UCi2PQRWQTjbmo9IyXNaSvdrI7NUxrqpViMYOb8ZnfRHvI8EtDMIjGo1fUxe6HWhAXl76yBTZveuLxgZ0aeog9');
+  ok('fmtA token', typeof m.token === 'string' && m.token.length >= 16);
+}
+// ---- multi-format forwarder: "To (Tap to copy)" + "Body (Tap to copy)" ----
+{
+  const m = parseTokenFromMessage('📱 Intercepted Outgoing SMS @CYBERxTRUSTED \nTo (Tap to copy):\n07829111653\nBody (Tap to copy):\nPHONEPE-SMS-VERIFY-LOGIN f5b16a46e7c53f2c113193054e490d542deaa1921a59d567b444801d61af70c7');
+  ok('fmtB number (strip leading 0)', m.number === '+917829111653');
+  ok('fmtB body', m.body === 'PHONEPE-SMS-VERIFY-LOGIN f5b16a46e7c53f2c113193054e490d542deaa1921a59d567b444801d61af70c7');
+  ok('fmtB token', m.token === 'f5b16a46e7c53f2c113193054e490d542deaa1921a59d567b444801d61af70c7');
+}
 // ---- SBI balance SMS ----
 {
   const amt = parseBalanceFromText('SBI A/C XX3456: Avl Bal - Rs. 45231.50');

