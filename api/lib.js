@@ -228,7 +228,7 @@ function parseTokenFromMessage(text) {
   }
 
   if (!token) {
-    m = t.match(/[^A-Za-z0-9](\d{4,8})[^A-Za-z0-9]/);
+    m = t.match(/(?:^|[^A-Za-z0-9])(\d{4,8})(?:[^A-Za-z0-9]|$)/);
     if (m) { token = m[1]; tokenType = 'OTP'; }
   }
 
