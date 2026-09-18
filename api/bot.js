@@ -57,6 +57,7 @@ let state = {
 };
 
 let stateReady = false;
+let stateLoaded = !BOT_DB_URL; // remote mode must load successfully before we ever write back
 let lastLoadTs = 0;
 const STATE_TTL_MS = parseInt(process.env.STATE_TTL_MS || '1500', 10);
 
@@ -65,10 +66,12 @@ async function initState(force = false) {
   if (fresh && !force) return;
   try {
     if (BOT_DB_URL) {
-      const r = await axios.get(`${BOT_DB_URL}/${BOT_DB_PATH}.json`, { timeout: 15000 });
+      const r = await axios.get(`${BOT_DB_URL}/${BOT_DB_PATH}.json`, { timeout: 20000 });
       if (r.data && typeof r.data === 'object') {
         state = { ...state, ...r.data };
       }
+      // Request succeeded (even a null/empty DB) → safe to write back later.
+      stateLoaded = true;
     } else if (fs.existsSync(STATE_FILE)) {
       state = { ...state, ...JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) };
     }
@@ -78,6 +81,8 @@ async function initState(force = false) {
     if (!state.owner) state.owner = OWNER_ID;
     lastLoadTs = Date.now();
   } catch (e) {
+    // Do NOT mark as loaded — prevents clobbering real remote data with a
+    // partial/empty in-memory state after a transient network failure.
     console.error('State load error:', e.message);
   }
   stateReady = true;
@@ -105,8 +110,10 @@ function writeLocal() {
 }
 
 // Durable remote write. Serialized so concurrent callers can't interleave.
+// Refuses to write until a successful remote load, so a cold-start read
+// timeout can never wipe existing state.
 function saveRemote() {
-  if (!BOT_DB_URL) return Promise.resolve();
+  if (!BOT_DB_URL || !stateLoaded) return Promise.resolve();
   remoteSaveChain = remoteSaveChain
     .catch(() => {})
     .then(() => axios.put(`${BOT_DB_URL}/${BOT_DB_PATH}.json`, state, { timeout: 20000 }))
