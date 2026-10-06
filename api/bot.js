@@ -1044,7 +1044,9 @@ async function showDeviceManagement(uid, chatId, messageId, deviceId, edit = tru
     return;
   }
   const user = getUserData(uid);
-  if (!forAdmin) updateUserData(uid, { device_id: deviceId, device_name: info.name });
+  if (!forAdmin) {
+    updateUserData(uid, { device_id: deviceId, device_name: info.name, listening: true });
+  }
   const sim = (user.default_sim || 'sim1').toUpperCase();
   let bEmoji = '🟡';
   const b = parseInt(info.battery);
@@ -1807,7 +1809,8 @@ async function handleCallback(update) {
       case 'add_firebase': return showConnectFirebase(uid, chatId, msgId, true);
       case 'toggle_auto': {
         const user = getUserData(uid);
-        updateUserData(uid, { auto_forward: !(user.auto_forward !== false) });
+        const nowOn = !(user.auto_forward !== false);
+        updateUserData(uid, { auto_forward: nowOn, listening: nowOn });
         return showMainMenu(uid, chatId, msgId, true);
       }
       case 'logout': return showLogoutConfirm(uid, chatId, msgId, true);
@@ -1918,7 +1921,7 @@ async function handleCallback(update) {
         return;
       }
       const info = await getDeviceInfo(uid, deviceId);
-      updateUserData(uid, { device_id: deviceId, device_name: info?.name || deviceId, auto_forward: true });
+      updateUserData(uid, { device_id: deviceId, device_name: info?.name || deviceId, auto_forward: true, listening: true });
       const lines = [
         '✅ **AUTO TOKEN SENDER**', '══════════════════════', '',
         '**Auto SMS Activated**',
@@ -2020,12 +2023,14 @@ async function handleCommand(update) {
 
     if (text.startsWith('/cancel')) {
       clearAwaiting(uid);
+      updateUserData(uid, { listening: false });
       await sendMessage(chatId, '❌ Cancelled.');
       return showMainMenu(uid, chatId);
     }
 
     if (text.startsWith('/start')) {
       clearAwaiting(uid);
+      updateUserData(uid, { listening: false });
       const user = getUserData(uid);
       if (user.fb_urls && user.fb_urls.length > 0) return showLoginStatus(uid, chatId);
       return showWelcome(uid, chatId);
