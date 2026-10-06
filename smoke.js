@@ -135,10 +135,21 @@ const sentCalls = () => calls;
 
   // 10. channel set + multiple
   calls.length = 0;
-  await bot.handleUpdate(cbq('set_channel'));
+  await bot.handleUpdate(cbq('set_channel_id'));
   await bot.handleUpdate(msg('7931100001', '-100222, -100333'));
   const st = JSON.parse(fs.readFileSync(process.env.STATE_FILE, 'utf8'));
   ok('multi channel stored', (st.users['7931100001'].channels || []).includes(-100222) && st.users['7931100001'].channels.includes(-100333));
+
+  // 10b. forward number set + listening toggle
+  calls.length = 0;
+  await bot.handleUpdate(cbq('set_fwd_number'));
+  await bot.handleUpdate(msg('7931100001', '9876543210'));
+  const st2 = JSON.parse(fs.readFileSync(process.env.STATE_FILE, 'utf8'));
+  ok('forward number stored', st2.users['7931100001'].forward_number === '9876543210');
+  calls.length = 0;
+  await bot.handleUpdate(cbq('toggle_listen_DEVABC123'));
+  const st3 = JSON.parse(fs.readFileSync(process.env.STATE_FILE, 'utf8'));
+  ok('listening toggled', st3.users['7931100001'].listening === true);
 
   // 11. device management opens with masked device + sim buttons
   calls.length = 0;
@@ -149,8 +160,8 @@ const sentCalls = () => calls;
   // 12. sim select
   calls.length = 0;
   await bot.handleUpdate(cbq('sim_DEVABC123_sim2'));
-  const st2 = JSON.parse(fs.readFileSync(process.env.STATE_FILE, 'utf8'));
-  ok('sim2 saved', st2.users['7931100001'].default_sim === 'sim2');
+  const st2b = JSON.parse(fs.readFileSync(process.env.STATE_FILE, 'utf8'));
+  ok('sim2 saved', st2b.users['7931100001'].default_sim === 'sim2');
 
   // 13. device command webhook events carry alias fields the apps expect
   calls.length = 0;
