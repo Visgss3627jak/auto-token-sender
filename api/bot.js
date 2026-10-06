@@ -1368,7 +1368,7 @@ async function showBankService(uid, chatId, messageId = null, edit = false, scop
     const bal = fmtAmount(dev.totalBalance);
     const banksLine = (dev.banks || []).length ? ` • ${dev.banks.join(', ')}` : '';
     lines.push(`🟢 **${dev.name}** — ${bal}${banksLine}`);
-    buttons.push([{ text: `🟢 ${dev.name} — ${bal}`, callback_data: `dev_${dev.id}` }]);
+    buttons.push([{ text: `🟢 ${dev.name} — ${bal}`, callback_data: scope === 'admin' ? `adev_${dev.id}` : `dev_${dev.id}` }]);
   }
   lines.push('', '📌 **Options:**');
   buttons.push([{ text: '💰 All Balances', callback_data: 'all_balances' }]);
