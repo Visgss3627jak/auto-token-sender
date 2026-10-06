@@ -1962,16 +1962,15 @@ async function handleCallback(update) {
       const user = getUserData(uid);
       const info = await getDeviceInfo(uid, deviceId).catch(() => null);
       const devFb = info?.fbUrl || (state.global_devices[deviceId]?.fbUrl) || '';
-      const lines = ['🔗 **Connected Firebases**', '══════════════════════', ''];
-      if (devFb) lines.push(`📱 Device is on:\n\`${devFb}\`\n`);
-      const urls = (user.fb_urls || []);
-      if (urls.length === 0) lines.push('_No Firebase connected yet._');
-      for (const u of urls) {
-        lines.push(`${u === devFb ? '🔵' : '⏺️'} \`${u}\``);
+      const lines = ['🔗 **Connected Firebase**', '══════════════════════', ''];
+      const active = devFb || user.active_fb_url || '';
+      if (!active) {
+        lines.push('_Is device ka koi Firebase URL connected nahi._');
+      } else {
+        lines.push(`📱 This device/user connected on:`);
+        lines.push(`\`${active}\``);
       }
-      lines.push('');
-      lines.push(`📌 Click \`${deviceId.substring(0, 8)}\` ke device ka URL upar hai. Use karo \`\`${devFb || 'https://...'}\`\`.`);
-      lines.push('Tap karke copy karo.');
+      lines.push('', 'Tap karke copy karo.');
       await sendMessage(chatId, lines.join('\n'));
       return;
     }
