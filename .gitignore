@@ -1,6 +1,12 @@
 node_modules/
 data/
-.env
-*.session
-.env*
 .vercel
+*.session
+
+# Real secrets - kabhi commit mat karo
+.env
+.env.local
+.env.*.local
+
+# Lekin example template track rahe
+!.env.example
